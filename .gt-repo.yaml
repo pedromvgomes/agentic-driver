@@ -1,0 +1,31 @@
+# Repository governance for gt. This file is the source of truth; run
+# 'gt repo sync' to render it, and 'gt repo check' to verify.
+#
+# Shared policy (Dependabot cooldown, commit-message prefixes, the weekly sync
+# schedule) lives in gt's templates, not here, so it stays consistent across
+# every governed repo.
+#
+# The pipeline stages below become jobs in ci-orchestration.yml, each calling a
+# ci-*/cd-* workflow that belongs to this repository: gt creates those once and
+# never touches them again. Branch protection needs exactly one check, ci-gate,
+# which waits on all of them.
+#
+# Only deliberate overrides are written here. Everything absent follows gt's
+# default and keeps following it as that default changes — a value pinned in
+# this file stops tracking gt, which is why sync removes the ones that merely
+# restate it. Run 'gt repo config' to see the resolved spec, defaults included.
+
+gt_version: 1.6.0
+dependabot:
+  - ecosystem: github-actions
+    directory: /
+  - ecosystem: gomod
+    directory: /
+pipeline:
+  ci:
+    stages:
+      - preflight
+      - build
+      - test
+  cd:
+    enabled: false
