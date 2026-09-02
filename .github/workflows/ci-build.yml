@@ -1,10 +1,6 @@
 # ci-build — this file is yours.
 #
-# gt created it once and will never modify or delete it again. Put this
-# repository's build steps here; the orchestration around it stays gt's.
-#
-# It is called by ci-orchestration.yml and must keep `workflow_call`, or the
-# orchestrator loses the stage.
+# gt created it once and will never modify or delete it again.
 name: ci-build
 
 on:
@@ -18,6 +14,35 @@ jobs:
     name: build
     runs-on: ubuntu-latest
     steps:
-      # A no-op so the stage is green from the first run. Replace it.
-      - name: Nothing to do yet
-        run: echo "No build steps defined. Add them in .github/workflows/ci-build.yml"
+      # Pinned by commit, not by tag: a tag is mutable, so `@v7` is a
+      # standing agreement to run whatever that tag points at on the day.
+      # Dependabot moves these.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The integration tag is compiled but never run here: a test that only
+      # builds under a tag nobody sets rots silently, and finding out at the
+      # moment someone needs it is the worst time.
+      - name: Build
+        run: |
+          go build ./...
+          go vet ./...
+          go vet -tags integration ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum

@@ -1,16 +1,10 @@
 # ci-test — this file is yours.
 #
-# gt created it once and will never modify or delete it again. Put this
-# repository's test suite here; the orchestration around it stays gt's.
+# gt created it once and will never modify or delete it again.
 #
-# Upload coverage as an artifact named `gt-coverage` and the bulwark
-# stage will consume it instead of running the suite a second time. Without it
-# bulwark falls back to running the tests itself, which is correct but slower.
-#
-#   - uses: actions/upload-artifact@<sha>
-#     with:
-#       name: gt-coverage
-#       path: coverage.out
+# The integration suite is deliberately absent. It drives the real agent CLIs,
+# which costs money and needs a credential; it is run by hand with
+# `go test -tags integration ./...`.
 name: ci-test
 
 on:
@@ -24,6 +18,17 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      # A no-op so the stage is green from the first run. Replace it.
-      - name: Nothing to do yet
-        run: echo "No test steps defined. Add them in .github/workflows/ci-test.yml"
+      # Pinned by commit, not by tag: a tag is mutable, so `@v7` is a
+      # standing agreement to run whatever that tag points at on the day.
+      # Dependabot moves these.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The driver spawns processes and reads their output from other
+      # goroutines, so the race detector is the point rather than a nicety.
+      - name: Test
+        run: go test -race -count=1 ./...
