@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
@@ -263,18 +265,40 @@ type agentSpec struct {
 	Prompt      string `json:"prompt"`
 }
 
+// permissionModes is the closed set the pinned CLI accepts.
+//
+// Unlike a model name, this is a vendor enum the CLI validates itself: an
+// unrecognised mode exits 1 with an empty stdout, which reaches a caller as
+// ErrProviderUnavailable — a typo wearing the costume of an outage, and one
+// that invites a retry loop. Refusing here names the actual problem.
+//
+// It is pinned knowledge like the flag spelling around it, so it moves when
+// PinnedVersion moves.
+var permissionModes = []string{
+	"acceptEdits",
+	"auto",
+	"bypassPermissions",
+	"manual",
+	"dontAsk",
+	"plan",
+}
+
 // PermissionArgs constrains what the run may do.
 //
 // Both flags are argv, not settings-file keys, so they apply to a run started
 // with --setting-sources ” — the whole reason a scripted run can be given a
 // narrow grant at all.
 //
-// The mode's spelling is not checked against a known set. Which modes exist is
-// the CLI's to say, and rejecting a name here would break the day the vendor
-// adds one, for the same reason ResolveModel passes an unknown name through.
+// The two are not cross-checked, and one combination is worth knowing about:
+// bypassPermissions with an allowlist renders both, and the mode wins. The
+// allowlist is then documentation rather than a restriction.
 func (p *dialect) PermissionArgs(mode string, allowedTools []string) ([]string, error) {
 	var args []string
 	if mode != "" {
+		if !slices.Contains(permissionModes, mode) {
+			return nil, fmt.Errorf("%w: permission mode %q is not one of %s",
+				agentic.ErrInvalidRequest, mode, strings.Join(permissionModes, ", "))
+		}
 		args = append(args, "--permission-mode", mode)
 	}
 	if len(allowedTools) == 0 {
@@ -282,17 +306,57 @@ func (p *dialect) PermissionArgs(mode string, allowedTools []string) ([]string, 
 	}
 
 	for _, tool := range allowedTools {
-		// An empty entry is passed through as an argument the CLI reads as a
-		// tool named "", which matches nothing and silently narrows the grant
-		// the caller thought they were giving.
-		if strings.TrimSpace(tool) == "" {
-			return nil, fmt.Errorf("%w: an allowed tool is blank", agentic.ErrInvalidRequest)
+		if err := checkToolPattern(tool); err != nil {
+			return nil, err
 		}
 	}
 	// One argument, comma-separated: a tool pattern such as `Bash(agtk memory
 	// anchor*)` contains spaces, and the space-separated spelling would split
 	// it across argv entries.
 	return append(args, "--allowedTools", strings.Join(allowedTools, ",")), nil
+}
+
+// checkToolPattern refuses an entry the CLI would read as something wider than
+// what it says.
+//
+// The CLI's tool list splits on whitespace that sits OUTSIDE parentheses, so a
+// space in the wrong place does not fail — it grants more. `Bash (agtk memory
+// anchor*)` becomes the bare grant `Bash`, which is every command; and any
+// entry yielding a bare `*` grants every tool outright. Both read, to a human
+// skimming a config, exactly like the narrow grant that was intended.
+//
+// A blank entry is refused for the mirror-image reason: the CLI reads it as a
+// tool named "", which matches nothing and quietly narrows the grant instead.
+func checkToolPattern(tool string) error {
+	if strings.TrimSpace(tool) == "" {
+		return fmt.Errorf("%w: an allowed tool is blank", agentic.ErrInvalidRequest)
+	}
+	if strings.Contains(tool, ",") {
+		// The entries are joined with commas, so one containing a comma
+		// silently becomes two grants.
+		return fmt.Errorf("%w: allowed tool %q contains a comma, which separates entries", agentic.ErrInvalidRequest, tool)
+	}
+
+	depth := 0
+	for _, r := range tool {
+		switch {
+		case r == '(':
+			depth++
+		case r == ')':
+			depth--
+		case depth == 0 && unicode.IsSpace(r):
+			return fmt.Errorf("%w: allowed tool %q has whitespace outside its parentheses, which the CLI reads as a wider grant",
+				agentic.ErrInvalidRequest, tool)
+		}
+	}
+	if depth != 0 {
+		return fmt.Errorf("%w: allowed tool %q has unbalanced parentheses", agentic.ErrInvalidRequest, tool)
+	}
+	if strings.TrimSpace(strings.Trim(tool, "*")) == "" {
+		return fmt.Errorf("%w: allowed tool %q grants every tool; leave AllowedTools empty to ask for no restriction",
+			agentic.ErrInvalidRequest, tool)
+	}
+	return nil
 }
 
 // dialectEnv makes the CLI behave like a program being scripted.

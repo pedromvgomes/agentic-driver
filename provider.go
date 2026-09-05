@@ -200,6 +200,11 @@ type Request struct {
 	// PermissionMode decides how the run answers permission prompts, spelled in
 	// the provider's own vocabulary. Empty leaves the CLI's default. It
 	// requires a Permitter.
+	//
+	// A mode that waives prompting outranks AllowedTools rather than combining
+	// with it, so the two together leave the allowlist as documentation. The
+	// provider does not reconcile them: which modes exist, and what each one
+	// overrides, is dialect.
 	PermissionMode string
 	// WorkDir is the working directory of the child process, or empty for the
 	// parent's.

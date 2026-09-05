@@ -72,9 +72,15 @@ func TestTheSameRosterRendersTheSameArgv(t *testing.T) {
 		},
 	}
 
-	first, _ := flagValue(build(t, req).Args, "--agents")
+	first, ok := flagValue(build(t, req).Args, "--agents")
+	if !ok {
+		t.Fatal("argv carries no --agents, so there is no ordering to be stable")
+	}
 	for range 8 {
-		again, _ := flagValue(build(t, req).Args, "--agents")
+		again, ok := flagValue(build(t, req).Args, "--agents")
+		if !ok {
+			t.Fatal("argv carries no --agents")
+		}
 		if again != first {
 			t.Fatalf("--agents = %q, want the stable %q", again, first)
 		}
@@ -138,26 +144,72 @@ func TestAToolPatternContainingSpacesStaysOneArgument(t *testing.T) {
 	}
 }
 
-// An empty entry reaches the CLI as a tool named "", which matches nothing and
-// silently narrows the grant the caller believed they were giving.
-func TestABlankAllowedToolIsRefused(t *testing.T) {
-	_, err := testProvider(t).Command(agentic.Request{
-		Prompt:       "hi",
-		AllowedTools: []string{"Read", "  "},
-	})
-	if !errors.Is(err, agentic.ErrInvalidRequest) {
-		t.Fatalf("error = %v, want ErrInvalidRequest", err)
+// The CLI splits its tool list on whitespace outside parentheses, so a stray
+// space does not fail — it grants MORE. `Bash (…)` becomes the bare grant
+// `Bash`, which is every command, and reads to a human exactly like the narrow
+// grant that was meant.
+func TestAToolEntryTheCLIWouldReadAsWiderIsRefused(t *testing.T) {
+	for name, tool := range map[string]string{
+		"space before parens": "Bash (agtk memory anchor*)",
+		"two grants in one":   "Read Write",
+		"trailing text":       "Bash(git status) Edit",
+		"bare wildcard":       "*",
+		"wildcard with space": "Edit *",
+		"unbalanced":          "Bash(agtk memory",
+		"blank":               "  ",
+		"embedded comma":      "Read,Write",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := testProvider(t).Command(agentic.Request{
+				Prompt:       "hi",
+				AllowedTools: []string{"Read", tool},
+			})
+			if !errors.Is(err, agentic.ErrInvalidRequest) {
+				t.Fatalf("Command accepted %q: error = %v, want ErrInvalidRequest", tool, err)
+			}
+		})
 	}
 }
 
-// Which modes exist is the CLI's to say, so a name this package does not know
-// is passed through rather than rejected — the same reason ResolveModel does
-// not police model names.
-func TestAnUnknownPermissionModeIsPassedThrough(t *testing.T) {
-	inv := build(t, agentic.Request{Prompt: "hi", PermissionMode: "somethingNew"})
+// The patterns a caller legitimately needs must survive the check that refuses
+// the widening ones; a validator that rejected these would be unusable.
+func TestOrdinaryToolPatternsAreAccepted(t *testing.T) {
+	inv := build(t, agentic.Request{
+		Prompt: "hi",
+		AllowedTools: []string{
+			"Read",
+			"Bash(agtk memory anchor*)",
+			"Bash(git status)",
+			"Write(./.agents/memory/notes/**)",
+			"Edit(*.go)",
+		},
+	})
 
-	if mode, _ := flagValue(inv.Args, "--permission-mode"); mode != "somethingNew" {
-		t.Errorf("--permission-mode = %q, want it passed through", mode)
+	if _, ok := flagValue(inv.Args, "--allowedTools"); !ok {
+		t.Fatalf("argv carries no --allowedTools: %q", inv.Args)
+	}
+}
+
+// The CLI declares --permission-mode over a closed set and exits 1 on anything
+// else, with an empty stdout — so an unrecognised mode reaches a caller as
+// ErrProviderUnavailable, a typo wearing the costume of an outage. Refusing
+// here names the actual problem.
+func TestAnUnknownPermissionModeIsRefusedRatherThanPassedThrough(t *testing.T) {
+	_, err := testProvider(t).Command(agentic.Request{Prompt: "hi", PermissionMode: "acceptEdit"})
+	if !errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Fatalf("error = %v, want ErrInvalidRequest", err)
+	}
+	if !strings.Contains(err.Error(), "acceptEdits") {
+		t.Errorf("error = %v, want it to name the modes that do exist", err)
+	}
+}
+
+func TestEveryModeTheCLIDeclaresIsAccepted(t *testing.T) {
+	for _, mode := range permissionModes {
+		inv := build(t, agentic.Request{Prompt: "hi", PermissionMode: mode})
+		if got, _ := flagValue(inv.Args, "--permission-mode"); got != mode {
+			t.Errorf("--permission-mode = %q, want %q", got, mode)
+		}
 	}
 }
 
