@@ -84,6 +84,47 @@ type Resumer interface {
 	ResumeArgs(sessionID string) []string
 }
 
+// AgentDefiner is optional: the provider accepts a roster of subagents on the
+// command line, so a scripted run can delegate to one without the CLI reading
+// any configuration off disk.
+//
+// It is a capability and not a Request field a provider may ignore, for the
+// same reason resuming is: the failure of dropping it is silent. A run whose
+// roster went missing does not fail — it answers the prompt itself, competently
+// and with the wrong context, and nothing in the reply says a delegation never
+// happened.
+type AgentDefiner interface {
+	// AgentArgs returns the arguments that declare the roster. It returns
+	// ErrInvalidRequest for a roster this CLI cannot express, so the refusal
+	// arrives before a process is started.
+	AgentArgs(agents map[string]Agent) ([]string, error)
+}
+
+// Permitter is optional: the provider can be told what a scripted run may do
+// without reading a settings file.
+//
+// Separate from AgentDefiner because the two are separately absent: a CLI may
+// take a roster and have no vocabulary for tool permissions, or the reverse.
+type Permitter interface {
+	// PermissionArgs returns the arguments that apply mode and allowedTools.
+	// Either may be zero, meaning the CLI's own default.
+	PermissionArgs(mode string, allowedTools []string) ([]string, error)
+}
+
+// Agent is one entry in a Request's roster.
+//
+// Deliberately two fields. Both are documented by the CLIs this drives; a
+// richer definition — a tool grant, a model, a colour — would be written from
+// memory, and a dialect written from memory produces a provider that passes its
+// own tests and nothing else. A run-wide tool restriction is Request's
+// AllowedTools, which is real.
+type Agent struct {
+	// Description tells the delegating agent when to use this one.
+	Description string
+	// Prompt is the subagent's instructions.
+	Prompt string
+}
+
 // Streamer is optional: the provider can emit newline-delimited events while it
 // works, instead of one envelope at the end.
 type Streamer interface {
@@ -143,6 +184,23 @@ type Request struct {
 	MaxTurns int
 	// SessionID continues a prior session. It requires a Resumer.
 	SessionID string
+	// Agents is the roster of subagents the run may delegate to, keyed by the
+	// name it delegates by. It requires an AgentDefiner.
+	//
+	// A scripted run cannot rely on the agent definitions a repo has on disk:
+	// the same measure that makes a run safe to script — refusing to load
+	// settings files, where a key like apiKeyHelper outranks an injected
+	// credential — is what puts those definitions out of reach. Naming the
+	// roster in the request is how a caller supplies one anyway.
+	Agents map[string]Agent
+	// AllowedTools restricts the run to these tools, spelled in the provider's
+	// own tool vocabulary. Empty leaves the CLI's own default in force, which
+	// is broader, not narrower. It requires a Permitter.
+	AllowedTools []string
+	// PermissionMode decides how the run answers permission prompts, spelled in
+	// the provider's own vocabulary. Empty leaves the CLI's default. It
+	// requires a Permitter.
+	PermissionMode string
 	// WorkDir is the working directory of the child process, or empty for the
 	// parent's.
 	WorkDir string

@@ -270,6 +270,62 @@ func TestAResumeIsRefusedByAProviderThatCannotDoIt(t *testing.T) {
 	}
 }
 
+// A run whose roster was dropped answers the prompt itself, competently and
+// with none of the context the delegation existed to supply.
+func TestARosterIsRefusedByAProviderThatCannotDefineAgents(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	_, err := d.Run(t.Context(), agentic.Request{
+		Prompt: "hi",
+		Agents: map[string]agentic.Agent{"curator": {Description: "curates", Prompt: "you curate"}},
+	})
+	if !errors.Is(err, agentic.ErrAgentsUnsupported) {
+		t.Fatalf("error = %v, want ErrAgentsUnsupported", err)
+	}
+	if fake.Ran() {
+		t.Error("a roster the provider cannot honour still spawned a process")
+	}
+}
+
+// A dropped restriction fails in the dangerous direction: the run proceeds
+// under the CLI's own defaults, which are wider than what was asked for.
+func TestScriptedPermissionsAreRefusedByAProviderThatCannotApplyThem(t *testing.T) {
+	for name, req := range map[string]agentic.Request{
+		"allowed tools":   {Prompt: "hi", AllowedTools: []string{"Read"}},
+		"permission mode": {Prompt: "hi", PermissionMode: "acceptEdits"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+			d := driver(t, &stub{}, fake)
+
+			_, err := d.Run(t.Context(), req)
+			if !errors.Is(err, agentic.ErrPermissionsUnsupported) {
+				t.Fatalf("error = %v, want ErrPermissionsUnsupported", err)
+			}
+			if fake.Ran() {
+				t.Error("a grant the provider cannot honour still spawned a process")
+			}
+		})
+	}
+}
+
+// An empty roster is the absence of a request, not a request a provider has to
+// be able to honour — refusing it would make the field unusable to any caller
+// that builds one conditionally.
+func TestAnEmptyRosterAsksNothingOfTheProvider(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	if _, err := d.Run(t.Context(), agentic.Request{
+		Prompt:       "hi",
+		Agents:       map[string]agentic.Agent{},
+		AllowedTools: []string{},
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func TestStreamingIsRefusedByAProviderThatCannotDoIt(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
 	d := driver(t, &stub{}, fake)
