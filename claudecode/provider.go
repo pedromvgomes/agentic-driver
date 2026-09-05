@@ -2,9 +2,13 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
+	"unicode"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
@@ -165,9 +169,12 @@ func (p *dialect) Command(req agentic.Request) (agentic.Invocation, error) {
 		return agentic.Invocation{}, fmt.Errorf("%w: claude -p needs a prompt", agentic.ErrInvalidRequest)
 	}
 
+	common, err := p.commonArgs(req)
+	if err != nil {
+		return agentic.Invocation{}, err
+	}
 	args := append(p.baseArgs(), "-p", req.Prompt, "--output-format", "json")
-	args = append(args, p.commonArgs(req)...)
-	return agentic.Invocation{Args: args, Env: p.dialectEnv()}, nil
+	return agentic.Invocation{Args: append(args, common...), Env: p.dialectEnv()}, nil
 }
 
 // StreamCommand is Command with the newline-delimited output format.
@@ -180,14 +187,17 @@ func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error)
 		return agentic.Invocation{}, fmt.Errorf("%w: claude -p needs a prompt", agentic.ErrInvalidRequest)
 	}
 
+	common, err := p.commonArgs(req)
+	if err != nil {
+		return agentic.Invocation{}, err
+	}
 	args := append(p.baseArgs(), "-p", req.Prompt, "--output-format", "stream-json", "--verbose")
-	args = append(args, p.commonArgs(req)...)
-	return agentic.Invocation{Args: args, Env: p.dialectEnv()}, nil
+	return agentic.Invocation{Args: append(args, common...), Env: p.dialectEnv()}, nil
 }
 
 // commonArgs renders the optional parts of a Request. A field left zero is a
 // flag left off, so the CLI's own default applies.
-func (p *dialect) commonArgs(req agentic.Request) []string {
+func (p *dialect) commonArgs(req agentic.Request) ([]string, error) {
 	var args []string
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
@@ -198,12 +208,155 @@ func (p *dialect) commonArgs(req agentic.Request) []string {
 	if req.SessionID != "" {
 		args = append(args, p.ResumeArgs(req.SessionID)...)
 	}
-	return args
+	permArgs, err := p.PermissionArgs(req.PermissionMode, req.AllowedTools)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, permArgs...)
+	agentArgs, err := p.AgentArgs(req.Agents)
+	if err != nil {
+		return nil, err
+	}
+	return append(args, agentArgs...), nil
 }
 
 // ResumeArgs continues a prior session.
 func (p *dialect) ResumeArgs(sessionID string) []string {
 	return []string{"--resume", sessionID}
+}
+
+// AgentArgs declares a roster as --agents, whose value is a JSON object keyed
+// by the name the run delegates by.
+//
+// encoding/json sorts map keys, so the same roster renders the same argv every
+// time — which is what lets a test assert on it, and what keeps a cached or
+// logged invocation comparable between runs.
+func (p *dialect) AgentArgs(agents map[string]agentic.Agent) ([]string, error) {
+	if len(agents) == 0 {
+		return nil, nil
+	}
+
+	// The CLI reads this as one JSON object, so a blank field does not fail —
+	// it produces an agent the model can see and cannot use, which is a harder
+	// thing to notice than a refused request.
+	spec := make(map[string]agentSpec, len(agents))
+	for name, a := range agents {
+		switch {
+		case name == "":
+			return nil, fmt.Errorf("%w: an agent has no name", agentic.ErrInvalidRequest)
+		case a.Description == "":
+			return nil, fmt.Errorf("%w: agent %q has no description, so nothing would delegate to it", agentic.ErrInvalidRequest, name)
+		case a.Prompt == "":
+			return nil, fmt.Errorf("%w: agent %q has no prompt", agentic.ErrInvalidRequest, name)
+		}
+		spec[name] = agentSpec{Description: a.Description, Prompt: a.Prompt}
+	}
+
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		return nil, fmt.Errorf("%w: encoding agents: %w", agentic.ErrInvalidRequest, err)
+	}
+	return []string{"--agents", string(encoded)}, nil
+}
+
+// agentSpec is the wire shape of one --agents entry.
+type agentSpec struct {
+	Description string `json:"description"`
+	Prompt      string `json:"prompt"`
+}
+
+// permissionModes is the closed set the pinned CLI accepts.
+//
+// Unlike a model name, this is a vendor enum the CLI validates itself: an
+// unrecognised mode exits 1 with an empty stdout, which reaches a caller as
+// ErrProviderUnavailable — a typo wearing the costume of an outage, and one
+// that invites a retry loop. Refusing here names the actual problem.
+//
+// It is pinned knowledge like the flag spelling around it, so it moves when
+// PinnedVersion moves.
+var permissionModes = []string{
+	"acceptEdits",
+	"auto",
+	"bypassPermissions",
+	"manual",
+	"dontAsk",
+	"plan",
+}
+
+// PermissionArgs constrains what the run may do.
+//
+// Both flags are argv, not settings-file keys, so they apply to a run started
+// with --setting-sources ” — the whole reason a scripted run can be given a
+// narrow grant at all.
+//
+// The two are not cross-checked, and one combination is worth knowing about:
+// bypassPermissions with an allowlist renders both, and the mode wins. The
+// allowlist is then documentation rather than a restriction.
+func (p *dialect) PermissionArgs(mode string, allowedTools []string) ([]string, error) {
+	var args []string
+	if mode != "" {
+		if !slices.Contains(permissionModes, mode) {
+			return nil, fmt.Errorf("%w: permission mode %q is not one of %s",
+				agentic.ErrInvalidRequest, mode, strings.Join(permissionModes, ", "))
+		}
+		args = append(args, "--permission-mode", mode)
+	}
+	if len(allowedTools) == 0 {
+		return args, nil
+	}
+
+	for _, tool := range allowedTools {
+		if err := checkToolPattern(tool); err != nil {
+			return nil, err
+		}
+	}
+	// One argument, comma-separated: a tool pattern such as `Bash(agtk memory
+	// anchor*)` contains spaces, and the space-separated spelling would split
+	// it across argv entries.
+	return append(args, "--allowedTools", strings.Join(allowedTools, ",")), nil
+}
+
+// checkToolPattern refuses an entry the CLI would read as something wider than
+// what it says.
+//
+// The CLI's tool list splits on whitespace that sits OUTSIDE parentheses, so a
+// space in the wrong place does not fail — it grants more. `Bash (agtk memory
+// anchor*)` becomes the bare grant `Bash`, which is every command; and any
+// entry yielding a bare `*` grants every tool outright. Both read, to a human
+// skimming a config, exactly like the narrow grant that was intended.
+//
+// A blank entry is refused for the mirror-image reason: the CLI reads it as a
+// tool named "", which matches nothing and quietly narrows the grant instead.
+func checkToolPattern(tool string) error {
+	if strings.TrimSpace(tool) == "" {
+		return fmt.Errorf("%w: an allowed tool is blank", agentic.ErrInvalidRequest)
+	}
+	if strings.Contains(tool, ",") {
+		// The entries are joined with commas, so one containing a comma
+		// silently becomes two grants.
+		return fmt.Errorf("%w: allowed tool %q contains a comma, which separates entries", agentic.ErrInvalidRequest, tool)
+	}
+
+	depth := 0
+	for _, r := range tool {
+		switch {
+		case r == '(':
+			depth++
+		case r == ')':
+			depth--
+		case depth == 0 && unicode.IsSpace(r):
+			return fmt.Errorf("%w: allowed tool %q has whitespace outside its parentheses, which the CLI reads as a wider grant",
+				agentic.ErrInvalidRequest, tool)
+		}
+	}
+	if depth != 0 {
+		return fmt.Errorf("%w: allowed tool %q has unbalanced parentheses", agentic.ErrInvalidRequest, tool)
+	}
+	if strings.TrimSpace(strings.Trim(tool, "*")) == "" {
+		return fmt.Errorf("%w: allowed tool %q grants every tool; leave AllowedTools empty to ask for no restriction",
+			agentic.ErrInvalidRequest, tool)
+	}
+	return nil
 }
 
 // dialectEnv makes the CLI behave like a program being scripted.
@@ -287,6 +440,8 @@ var (
 	_ agentic.Isolator      = (*Provider)(nil)
 	_ agentic.ModelResolver = (*Provider)(nil)
 	_ agentic.Resumer       = (*Provider)(nil)
+	_ agentic.AgentDefiner  = (*Provider)(nil)
+	_ agentic.Permitter     = (*Provider)(nil)
 	_ agentic.Streamer      = (*Provider)(nil)
 	_ agentic.Installer     = (*Provider)(nil)
 
@@ -297,6 +452,8 @@ var (
 	_ agentic.Isolator      = (*PathProvider)(nil)
 	_ agentic.ModelResolver = (*PathProvider)(nil)
 	_ agentic.Resumer       = (*PathProvider)(nil)
+	_ agentic.AgentDefiner  = (*PathProvider)(nil)
+	_ agentic.Permitter     = (*PathProvider)(nil)
 	_ agentic.Streamer      = (*PathProvider)(nil)
 )
 

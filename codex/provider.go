@@ -108,8 +108,16 @@ func (p *Provider) DenyEnv() []string {
 }
 
 // Compile-time proof of which capabilities this provider claims. It implements
-// neither Installer nor Streamer nor Resumer: absent capabilities are absent
-// from the type, and the driver answers for them without spawning anything.
+// neither Installer nor Streamer nor Resumer nor AgentDefiner nor Permitter:
+// absent capabilities are absent from the type, and the driver answers for them
+// without spawning anything.
+//
+// The last two are absent on the same grounds as Parse. `codex exec` has its own
+// vocabulary for sandboxing and approvals, but it is not one this package has
+// captured from the CLI, and spelling it from memory would produce flags that
+// satisfy a test written from the same memory. Refusing is the safe direction
+// here in particular: a tool grant is the one field whose silent
+// mistranslation leaves a run with more authority than was asked for.
 var (
 	_ agentic.Provider = (*Provider)(nil)
 	_ agentic.Isolator = (*Provider)(nil)

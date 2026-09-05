@@ -295,6 +295,23 @@ func (d *Driver) prepare(req Request) (Request, error) {
 		}
 	}
 
+	// Same reasoning, one step worse: a run whose roster was dropped answers
+	// the prompt itself, competently, with none of the context the delegation
+	// existed to supply.
+	if len(req.Agents) > 0 {
+		if _, ok := d.provider.(AgentDefiner); !ok {
+			return req, fmt.Errorf("%w: %s", ErrAgentsUnsupported, d.descriptor.ID)
+		}
+	}
+
+	// A dropped restriction fails in the dangerous direction: the run proceeds
+	// with the CLI's own defaults, which are wider than what was asked for.
+	if len(req.AllowedTools) > 0 || req.PermissionMode != "" {
+		if _, ok := d.provider.(Permitter); !ok {
+			return req, fmt.Errorf("%w: %s", ErrPermissionsUnsupported, d.descriptor.ID)
+		}
+	}
+
 	// The model is settled before the provider sees the request, so Command is
 	// handed a name the CLI accepts rather than each provider having to
 	// remember to resolve one.
