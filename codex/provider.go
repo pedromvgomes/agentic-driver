@@ -268,7 +268,16 @@ func publish(path string, content []byte) error {
 		return fmt.Errorf("inspecting %s: %w", path, err)
 
 	case err == nil && info.Mode().IsRegular():
-		if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, content) {
+		// The path carries no caller-supplied component: every segment is
+		// either the verified schema directory or the hex of a digest this
+		// package computed, and Lstat has just established this one is a
+		// regular file rather than a link out of it.
+		//
+		// A file that cannot be read is republished rather than reported: not
+		// being able to establish the contents is the same answer as their
+		// being wrong.
+		current, readErr := os.ReadFile(path) // #nosec G304 -- a digest-named file under a directory this package verified
+		if readErr == nil && bytes.Equal(current, content) {
 			return nil
 		}
 	case err == nil:
