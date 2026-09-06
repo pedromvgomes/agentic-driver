@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"55555555-5555-4555-8555-555555555555"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll read the file, then interpret its contents."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/opt/homebrew/bin/zsh -lc 'cat a.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/opt/homebrew/bin/zsh -lc 'cat a.txt'","aggregated_output":"hello world\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The file contains:\n\n```text\nhello world\n```\n\nIt’s the classic minimal greeting—often used to confirm that a program, environment, or example is working."}}
+{"type":"turn.completed","usage":{"input_tokens":27895,"cached_input_tokens":23040,"cache_write_input_tokens":0,"output_tokens":135,"reasoning_output_tokens":0}}

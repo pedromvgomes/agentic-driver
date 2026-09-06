@@ -85,10 +85,24 @@ func (passthrough) Descriptor() agentic.Descriptor {
 	return agentic.Descriptor{ID: "under-test", DisplayName: "Under test", Binary: "fake-agent"}
 }
 
-func (passthrough) Command(req agentic.Request) (agentic.Invocation, error) {
+func (passthrough) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	return agentic.Invocation{Args: []string{"--prompt", req.Prompt}}, nil
 }
 
-func (passthrough) Parse(stdout, stderr []byte, code int) (agentic.Result, error) {
-	return agentic.Result{Text: string(stdout)}, nil
+func (passthrough) NewDecoder() agentic.Decoder { return &passthroughDecoder{} }
+
+// passthroughDecoder treats every line as the answer, which is enough for tests
+// about the environment a child is given rather than what it said.
+type passthroughDecoder struct {
+	text string
+	seen bool
+}
+
+func (d *passthroughDecoder) Decode(line []byte) (agentic.Event, error) {
+	d.text, d.seen = string(line), true
+	return agentic.Event{Kind: agentic.EventKindText, Text: d.text}, nil
+}
+
+func (d *passthroughDecoder) Result() (agentic.Result, bool) {
+	return agentic.Result{Text: d.text}, d.seen
 }

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -30,23 +32,56 @@ func (s *stub) Descriptor() agentic.Descriptor {
 	return agentic.Descriptor{ID: "stub", DisplayName: "Stub", Binary: "fake-agent"}
 }
 
-func (s *stub) Command(req agentic.Request) (agentic.Invocation, error) {
+func (s *stub) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	if req.Prompt == "" {
 		return agentic.Invocation{}, errors.New("stub: no prompt")
 	}
 	return agentic.Invocation{Args: append([]string{"--prompt", req.Prompt}, s.args...), Env: s.env}, nil
 }
 
-func (s *stub) Parse(stdout, stderr []byte, code int) (agentic.Result, error) {
-	if s.parseErr != nil {
-		return agentic.Result{}, s.parseErr
-	}
-	var result agentic.Result
-	if err := json.Unmarshal(stdout, &result); err != nil {
-		return agentic.Result{}, err
-	}
-	return result, nil
+func (s *stub) NewDecoder() agentic.Decoder { return &stubDecoder{stub: s} }
+
+// stubDecoder reads either shape a test needs: a line naming an event kind, or
+// a bare Result document standing in for a run that only ever says one thing.
+type stubDecoder struct {
+	*stub
+	result   agentic.Result
+	complete bool
 }
+
+func (d *stubDecoder) Decode(line []byte) (agentic.Event, error) {
+	if d.parseErr != nil {
+		return agentic.Event{}, d.parseErr
+	}
+
+	var event struct {
+		Kind string `json:"kind"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(line, &event); err != nil {
+		return agentic.Event{}, err
+	}
+	switch event.Kind {
+	case "text":
+		return agentic.Event{Kind: agentic.EventKindText, Text: event.Text}, nil
+	case "result":
+		d.result, d.complete = agentic.Result{Text: event.Text}, true
+		return agentic.Event{}, nil
+	case "":
+		// Not an event line at all. A whole Result document is how a provider
+		// with nothing to stream says everything it has to say.
+		var result agentic.Result
+		if err := json.Unmarshal(line, &result); err != nil {
+			return agentic.Event{}, err
+		}
+		d.result, d.complete = result, true
+		return agentic.Event{}, nil
+	default:
+		return agentic.Event{}, nil
+	}
+}
+
+func (d *stubDecoder) Result() (agentic.Result, bool) { return d.result, d.complete }
 
 // isolating is a stub that can also be handed a credential.
 type isolating struct {
@@ -326,15 +361,6 @@ func TestAnEmptyRosterAsksNothingOfTheProvider(t *testing.T) {
 	}
 }
 
-func TestStreamingIsRefusedByAProviderThatCannotDoIt(t *testing.T) {
-	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
-	d := driver(t, &stub{}, fake)
-
-	if _, err := d.Stream(t.Context(), agentic.Request{Prompt: "hi"}); !errors.Is(err, agentic.ErrStreamUnsupported) {
-		t.Errorf("error = %v, want ErrStreamUnsupported", err)
-	}
-}
-
 func TestInstallingIsRefusedByAProviderThatVendorsNothing(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
 	d := driver(t, &stub{}, fake)
@@ -411,9 +437,9 @@ type modelRecording struct {
 	saw string
 }
 
-func (m *modelRecording) Command(req agentic.Request) (agentic.Invocation, error) {
+func (m *modelRecording) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	m.saw = req.Model
-	return m.stub.Command(req)
+	return m.stub.StreamCommand(req)
 }
 
 type modelRecordingResolver struct {
@@ -565,4 +591,60 @@ func TestAMissingBinarySaysWhatToDoAboutIt(t *testing.T) {
 	if strings.Contains(runErr.Error(), "call Install") {
 		t.Errorf("error = %q, offers Install for a provider that vendors nothing", runErr)
 	}
+}
+
+// A bound the CLI cannot express is refused before a process starts, for the
+// same reason a dropped roster or tool grant is: the failure is silent. A run
+// whose cap went missing does not fail — it runs as long as it likes, and
+// nothing in the answer says the limit was never applied.
+func TestATurnLimitIsRefusedByAProviderThatCannotBoundTheLoop(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", MaxTurns: 3})
+	if !errors.Is(err, agentic.ErrTurnLimitUnsupported) {
+		t.Errorf("error = %v, want ErrTurnLimitUnsupported", err)
+	}
+	if fake.Ran() {
+		t.Error("the CLI was spawned for a bound it cannot honour")
+	}
+}
+
+// The gate is the capability, not the field: a provider that can bound the loop
+// is handed the request untouched.
+func TestATurnLimitReachesAProviderThatCanBoundTheLoop(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &limiting{}, fake)
+
+	if _, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", MaxTurns: 3}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !slices.Contains(fake.Recorded(t).Args, "--max-turns") {
+		t.Errorf("argv = %q, want the bound the provider spelled", fake.Recorded(t).Args)
+	}
+}
+
+// limiting is a stub that can bound the agent loop.
+type limiting struct {
+	stub
+}
+
+func (l *limiting) TurnLimitArgs(maxTurns int) ([]string, error) {
+	return []string{"--max-turns", strconv.Itoa(maxTurns)}, nil
+}
+
+func (l *limiting) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
+	inv, err := l.stub.StreamCommand(req)
+	if err != nil {
+		return agentic.Invocation{}, err
+	}
+	if req.MaxTurns > 0 {
+		args, err := l.TurnLimitArgs(req.MaxTurns)
+		if err != nil {
+			return agentic.Invocation{}, err
+		}
+		inv.Args = append(inv.Args, args...)
+	}
+	return inv, nil
 }

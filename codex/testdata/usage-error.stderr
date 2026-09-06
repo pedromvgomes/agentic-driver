@@ -1,0 +1,8 @@
+error: unexpected argument '--nope-not-a-flag' found
+
+  tip: to pass '--nope-not-a-flag' as a value, use '-- --nope-not-a-flag'
+
+Usage: codex exec [OPTIONS] [PROMPT]
+       codex exec [OPTIONS] <COMMAND> [ARGS]
+
+For more information, try '--help'.

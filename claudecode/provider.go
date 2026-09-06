@@ -163,25 +163,11 @@ func (p *dialect) baseArgs() []string {
 	return []string{"--setting-sources", ""}
 }
 
-// Command renders a Request as `claude -p`.
-func (p *dialect) Command(req agentic.Request) (agentic.Invocation, error) {
-	if req.Prompt == "" {
-		return agentic.Invocation{}, fmt.Errorf("%w: claude -p needs a prompt", agentic.ErrInvalidRequest)
-	}
-
-	common, err := p.commonArgs(req)
-	if err != nil {
-		return agentic.Invocation{}, err
-	}
-	args := append(p.baseArgs(), "-p", req.Prompt, "--output-format", "json")
-	return agentic.Invocation{Args: append(args, common...), Env: p.dialectEnv()}, nil
-}
-
-// StreamCommand is Command with the newline-delimited output format.
+// StreamCommand renders a Request as `claude -p`.
 //
-// --verbose is not optional here: without it the CLI collapses stream-json down
-// to the single terminal envelope, which is the non-streaming case wearing a
-// different flag.
+// --verbose is not optional: without it the CLI collapses stream-json down to
+// the single terminal envelope, and every intermediate event a caller asked to
+// watch is lost.
 func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	if req.Prompt == "" {
 		return agentic.Invocation{}, fmt.Errorf("%w: claude -p needs a prompt", agentic.ErrInvalidRequest)
@@ -203,7 +189,11 @@ func (p *dialect) commonArgs(req agentic.Request) ([]string, error) {
 		args = append(args, "--model", req.Model)
 	}
 	if req.MaxTurns > 0 {
-		args = append(args, "--max-turns", strconv.Itoa(req.MaxTurns))
+		turnArgs, err := p.TurnLimitArgs(req.MaxTurns)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, turnArgs...)
 	}
 	if req.SessionID != "" {
 		args = append(args, p.ResumeArgs(req.SessionID)...)
@@ -218,6 +208,18 @@ func (p *dialect) commonArgs(req agentic.Request) ([]string, error) {
 		return nil, err
 	}
 	return append(args, agentArgs...), nil
+}
+
+// TurnLimitArgs bounds the agent loop.
+//
+// The unit is one iteration of that loop, not one exchange with the user: a
+// single prompt that calls three tools spends several. A bound of one answers
+// without ever calling a tool.
+func (p *dialect) TurnLimitArgs(maxTurns int) ([]string, error) {
+	if maxTurns < 1 {
+		return nil, fmt.Errorf("%w: a turn limit of %d bounds the loop to nothing", agentic.ErrInvalidRequest, maxTurns)
+	}
+	return []string{"--max-turns", strconv.Itoa(maxTurns)}, nil
 }
 
 // ResumeArgs continues a prior session.
@@ -442,7 +444,7 @@ var (
 	_ agentic.Resumer       = (*Provider)(nil)
 	_ agentic.AgentDefiner  = (*Provider)(nil)
 	_ agentic.Permitter     = (*Provider)(nil)
-	_ agentic.Streamer      = (*Provider)(nil)
+	_ agentic.TurnLimiter   = (*Provider)(nil)
 	_ agentic.Installer     = (*Provider)(nil)
 
 	// The same dialect, minus the one capability that depends on owning the
@@ -454,7 +456,7 @@ var (
 	_ agentic.Resumer       = (*PathProvider)(nil)
 	_ agentic.AgentDefiner  = (*PathProvider)(nil)
 	_ agentic.Permitter     = (*PathProvider)(nil)
-	_ agentic.Streamer      = (*PathProvider)(nil)
+	_ agentic.TurnLimiter   = (*PathProvider)(nil)
 )
 
 // Install downloads and verifies a version.

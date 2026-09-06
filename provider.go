@@ -23,20 +23,54 @@ type Provider interface {
 	// Descriptor identifies the provider and names the binary it drives.
 	Descriptor() Descriptor
 
-	// Command translates a Request into the provider's own flags. It returns
-	// ErrInvalidRequest for a request this CLI cannot express, so the refusal
-	// arrives before a process is started rather than as a usage message on
-	// stderr.
-	Command(Request) (Invocation, error)
-
-	// Parse turns one finished invocation into a Result.
+	// StreamCommand translates a Request into the provider's own flags. It
+	// returns ErrInvalidRequest for a request this CLI cannot express, so the
+	// refusal arrives before a process is started rather than as a usage
+	// message on stderr.
 	//
-	// It is a pure function of what the process produced, which is what makes
-	// it testable against committed output from the real CLI. It is called
-	// even when code is non-zero: a CLI reports a rejected credential in its
-	// JSON body and may still exit non-zero, so judging the exit code first
-	// would turn a clear verdict into a spurious outage.
-	Parse(stdout, stderr []byte, code int) (Result, error)
+	// It is the only argv builder. A provider that spelled one invocation for
+	// a streamed run and another for a batched one would have two dialects to
+	// keep in step, and the day they drift is the day Run and Stream answer
+	// the same Request differently.
+	StreamCommand(Request) (Invocation, error)
+
+	// NewDecoder returns a decoder for exactly one run.
+	NewDecoder() Decoder
+}
+
+// Decoder consumes the lines of one run, in order, and folds them into a
+// Result.
+//
+// It is stateful, and per-run, because a Result is a fold rather than a
+// projection of any single line. Codex spreads one across a whole stream — the
+// session id arrives on the first line, the answer on the last agent message,
+// the token usage on the terminal line — so a stateless function of the final
+// line could not build one at all.
+//
+// Being an ordinary object fed lines from a slice is what keeps it testable
+// against committed output from the real CLI, with no process involved.
+type Decoder interface {
+	// Decode consumes one line and reports what it means.
+	//
+	// A line the provider does not model yields the zero Event, which the
+	// driver skips: a CLI adding an event type is not a reason to fail a run
+	// that is otherwise working. An error means the line could not be
+	// understood at all, which ends the run.
+	//
+	// It never returns EventKindResult. The terminal event is built by the
+	// driver from Result, so there is exactly one thing in the library that
+	// decides what a run finally said.
+	Decode(line []byte) (Event, error)
+
+	// Result is the fold over every line decoded so far.
+	//
+	// ok reports whether the run reached a terminal outcome. False means the
+	// stream stopped before the CLI said how it ended, which is an outage: no
+	// statement was made about the request, so there is no verdict to report.
+	// A CLI that ended a turn badly returns true with IsError set — that is a
+	// verdict, and the difference between the two is the whole point of the
+	// second return value.
+	Result() (result Result, ok bool)
 }
 
 // Isolator is optional: the provider can be handed a specific credential and
@@ -125,17 +159,23 @@ type Agent struct {
 	Prompt string
 }
 
-// Streamer is optional: the provider can emit newline-delimited events while it
-// works, instead of one envelope at the end.
-type Streamer interface {
-	// StreamCommand is Command's counterpart for the streaming dialect.
-	StreamCommand(Request) (Invocation, error)
-
-	// ParseEvent decodes one line of the stream. A line the provider does not
-	// model yields an Event with an empty Kind, which the driver skips: a CLI
-	// adding an event type is not a reason to fail a run that is otherwise
-	// working.
-	ParseEvent(line []byte) (Event, error)
+// TurnLimiter is optional: the provider can bound the agent loop.
+//
+// A capability rather than a Request field every provider honours, because the
+// two CLIs do not merely spell it differently — one has no concept at that
+// granularity. Claude Code counts a turn as one iteration of the agent loop and
+// bounds it with a flag. Codex counts a turn as the WHOLE loop, and has no
+// configuration field for a limit at all; the nearest-looking spelling is
+// accepted and silently ignored, which is the failure this interface exists to
+// make impossible.
+//
+// A caller wanting one bound that behaves identically everywhere uses
+// Request.Timeout, which the driver enforces itself and which asks nothing of
+// the CLI.
+type TurnLimiter interface {
+	// TurnLimitArgs returns the arguments that bound the loop to maxTurns. It
+	// returns ErrInvalidRequest for a bound this CLI cannot express.
+	TurnLimitArgs(maxTurns int) ([]string, error)
 }
 
 // Installer is optional: only for providers that vendor a binary.
@@ -180,7 +220,10 @@ type Request struct {
 	// then the CLI's own. A provider implementing ModelResolver also accepts a
 	// family alias such as "opus" here.
 	Model string
-	// MaxTurns bounds the agent loop, or is zero for the CLI's default.
+	// MaxTurns bounds the agent loop, or is zero for the CLI's default. It
+	// requires a TurnLimiter, and it is counted in that provider's own unit —
+	// see Result.Turns. Request.Timeout is the bound that means the same thing
+	// everywhere.
 	MaxTurns int
 	// SessionID continues a prior session. It requires a Resumer.
 	SessionID string
@@ -244,7 +287,15 @@ type Result struct {
 	Model string
 	// Usage is what the turn consumed.
 	Usage Usage
-	// Turns is how many turns the agent took.
+	// Turns is how many turns the agent took, counted in the provider's own
+	// unit.
+	//
+	// The unit is NOT comparable across providers, and nothing in the library
+	// derives behaviour from it. Claude Code counts one turn per iteration of
+	// the agent loop, so a run that called three tools reports several. Codex
+	// counts one turn for the entire loop, so a single exec reports one
+	// however much work it did. Reading the two as the same quantity makes an
+	// exhaustive codex run look cheaper than a trivial Claude Code one.
 	Turns int
 	// IsError reports that the CLI itself declared the turn a failure. It is a
 	// verdict from the provider, not an error from the library: the Result is
@@ -275,8 +326,9 @@ const (
 	EventKindToolUse EventKind = "tool_use"
 	// EventKindToolResult is a tool answering.
 	EventKindToolResult EventKind = "tool_result"
-	// EventKindResult is the terminal envelope. Its Result is the same value
-	// Parse would have produced for a non-streaming run.
+	// EventKindResult is the terminal event, built by the driver from the
+	// decoder's fold. Its Result is the same value Run returns, because Run is
+	// this event and nothing else.
 	EventKindResult EventKind = "result"
 )
 

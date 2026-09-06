@@ -25,16 +25,7 @@ const maxEventLine = 4 << 20 // 4 MiB
 // The terminal EventKindResult carries the same Result a non-streaming Run
 // would have produced.
 func (d *Driver) Stream(ctx context.Context, req Request) (iter.Seq2[Event, error], error) {
-	streamer, ok := d.provider.(Streamer)
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrStreamUnsupported, d.descriptor.ID)
-	}
-	req, err := d.prepare(req)
-	if err != nil {
-		return nil, err
-	}
-
-	inv, err := streamer.StreamCommand(req)
+	req, inv, err := d.invocation(req)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +61,14 @@ func (d *Driver) Stream(ctx context.Context, req Request) (iter.Seq2[Event, erro
 		cmd.Stderr = &stderr
 
 		if err := cmd.Start(); err != nil {
+			// A missing or unrunnable binary is the common case here, and
+			// "fork/exec …: no such file or directory" does not say what to do
+			// about it. Checked only on the failure path, so a healthy run pays
+			// nothing for it.
+			if ready := d.Ready(); ready != nil {
+				yield(Event{}, ready)
+				return
+			}
 			yield(Event{}, fmt.Errorf("%w: %s could not be run: %w", ErrProviderUnavailable, d.descriptor.ID, err))
 			return
 		}
@@ -86,20 +85,29 @@ func (d *Driver) Stream(ctx context.Context, req Request) (iter.Seq2[Event, erro
 			}
 		}()
 
+		// One decoder for one run. Its state is the fold that becomes the
+		// terminal Result, so it must not be shared with any other invocation.
+		decoder := d.provider.NewDecoder()
+
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64<<10), maxEventLine)
 
+		var decodeErr error
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if len(line) == 0 {
 				continue
 			}
 
-			event, err := streamer.ParseEvent(line)
+			event, err := decoder.Decode(line)
 			if err != nil {
-				yield(Event{}, fmt.Errorf("%w: %s emitted an unreadable event: %w",
-					ErrProviderUnavailable, d.descriptor.ID, err))
-				return
+				// Recorded and reported after the child is reaped, so the CLI's
+				// own stderr can be carried with it: a CLI that explains itself
+				// before emitting something unreadable is explaining the very
+				// thing being diagnosed. Reading the stderr buffer while the
+				// process is still writing to it would be a race.
+				decodeErr = err
+				break
 			}
 			if event.Kind == EventKindUnknown {
 				continue
@@ -109,24 +117,55 @@ func (d *Driver) Stream(ctx context.Context, req Request) (iter.Seq2[Event, erro
 			}
 		}
 
+		// Cancelled before the wait, because abandoning stdout part-way leaves
+		// a child that fills the pipe and blocks forever.
+		if decodeErr != nil {
+			cancel()
+		}
+		reaped = true
+		waitErr := cmd.Wait()
+
+		if decodeErr != nil {
+			yield(Event{}, fmt.Errorf("%w: %s emitted an unreadable event: %w%s",
+				ErrProviderUnavailable, d.descriptor.ID, decodeErr, d.suffix(stderr.Bytes())))
+			return
+		}
+
 		// Every remaining failure is reported through the same helper, so a
 		// stream ends the way a Run does.
-		reaped = true
-		if err := d.streamEnd(parent, ctx, cmd.Wait(), scanner.Err(), stderr.Bytes(), timeout); err != nil {
+		result, complete := decoder.Result()
+		if err := d.streamEnd(parent, ctx, waitErr, scanner.Err(), stderr.Bytes(), timeout, complete); err != nil {
 			yield(Event{}, err)
+			return
 		}
+
+		// Built here rather than by the decoder, so exactly one thing in the
+		// library decides what a run finally said and Run cannot disagree with
+		// the stream it folded.
+		yield(Event{Kind: EventKindResult, Text: result.Text, Result: result}, nil)
 	}, nil
 }
 
 // streamEnd waits for the child and reports why the stream stopped, or nil if
 // it simply finished.
 //
-// A non-zero exit is an error here, unlike in Run: there is no envelope left to
-// parse, so nothing downstream can turn the code into a verdict.
-func (d *Driver) streamEnd(parent, ctx context.Context, waitErr, scanErr error, stderr []byte, timeout time.Duration) error {
+// complete says the decoder reached a terminal outcome, and it outranks
+// everything except a caller who went away. A CLI reports a rejected credential
+// or an unsupported model by finishing its stream properly and THEN exiting
+// non-zero; judging the exit code first turns those verdicts into spurious
+// outages. A complete result outranks a TIMEOUT for the same reason it does in
+// Run: the answer arrived and was paid for, and a CLI that flushes its last
+// event and then hangs holding stdout open has stalled in its teardown, not in
+// the work.
+func (d *Driver) streamEnd(parent, ctx context.Context, waitErr, scanErr error, stderr []byte, timeout time.Duration, complete bool) error {
 	switch {
 	case parent.Err() != nil:
+		// Never reported as a success. Everything else here is a question of
+		// what came back; this is a question of whether anyone is still
+		// listening.
 		return fmt.Errorf("%w: %s was cancelled: %w", ErrProviderUnavailable, d.descriptor.ID, parent.Err())
+	case complete:
+		return nil
 	case ctx.Err() != nil:
 		return fmt.Errorf("%w: %s did not finish within %s%s",
 			ErrProviderUnavailable, d.descriptor.ID, timeout, d.suffix(stderr))
@@ -137,7 +176,14 @@ func (d *Driver) streamEnd(parent, ctx context.Context, waitErr, scanErr error, 
 		return fmt.Errorf("%w: %s exited before the stream ended: %w%s",
 			ErrProviderUnavailable, d.descriptor.ID, waitErr, d.suffix(stderr))
 	}
-	return nil
+
+	// A clean exit that never said how the turn ended. Positive evidence of a
+	// terminal outcome is required, because the alternative is reporting a run
+	// that produced no answer whatsoever as a successful empty one. A usage
+	// error takes this path when the CLI rejects a flag and exits zero, and so
+	// does a stream truncated at exactly a line boundary.
+	return fmt.Errorf("%w: %s ended without a result%s",
+		ErrProviderUnavailable, d.descriptor.ID, d.suffix(stderr))
 }
 
 // boundedBuffer collects output up to a limit and then discards, so a child

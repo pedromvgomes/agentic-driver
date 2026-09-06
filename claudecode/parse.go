@@ -166,13 +166,28 @@ type streamEvent struct {
 	} `json:"message"`
 }
 
-// ParseEvent decodes one line of `--output-format stream-json --verbose`.
+// NewDecoder returns a decoder for one run.
+func (p *dialect) NewDecoder() agentic.Decoder { return &decoder{dialect: p} }
+
+// decoder folds one run of `--output-format stream-json --verbose`.
+//
+// Claude Code puts everything a Result needs on the single terminal line, so
+// the only state this carries is that line's verdict. It is a decoder rather
+// than a function of the last line anyway, because the interface has to serve
+// a CLI that spreads a result across a whole stream.
+type decoder struct {
+	*dialect
+	result   agentic.Result
+	complete bool
+}
+
+// Decode decodes one line of the stream.
 //
 // A line whose type this package does not model returns the zero Event, which
 // the driver skips. Claude Code emits bookkeeping events — rate-limit notices,
 // an init banner — that a caller consuming text has no use for, and a release
 // adding another one is not a reason to fail a run that is working.
-func (p *dialect) ParseEvent(line []byte) (agentic.Event, error) {
+func (d *decoder) Decode(line []byte) (agentic.Event, error) {
 	var ev streamEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
 		return agentic.Event{}, err
@@ -180,29 +195,35 @@ func (p *dialect) ParseEvent(line []byte) (agentic.Event, error) {
 
 	switch ev.Type {
 	case "assistant":
-		return p.assistantEvent(ev, line), nil
+		return d.assistantEvent(ev, line), nil
 
 	case "user":
 		// A tool's output comes back on a USER line, not an assistant one:
 		// the transcript models a tool as something that answers the agent.
 		// Reading tool results off assistant lines finds none, and a caller
 		// watching the agent work never sees what its tools returned.
-		return p.userEvent(ev, line), nil
+		return d.userEvent(ev, line), nil
 
 	case "result":
 		// The terminal line of a stream is the same document a non-streaming
-		// run prints, so it is parsed by the same function rather than a second
+		// run prints, so it is read by the same function rather than a second
 		// implementation that could drift from it.
-		result, err := p.Parse(line, nil, 0)
+		result, err := d.Parse(line, nil, 0)
 		if err != nil {
 			return agentic.Event{}, err
 		}
-		return agentic.Event{Kind: agentic.EventKindResult, Text: result.Text, Result: result, Raw: clone(line)}, nil
+		d.result, d.complete = result, true
+		// Recorded, not yielded. The driver builds the terminal event from
+		// Result, so a stream cannot announce one outcome and its fold another.
+		return agentic.Event{}, nil
 
 	default:
 		return agentic.Event{}, nil
 	}
 }
+
+// Result is the verdict the terminal line carried.
+func (d *decoder) Result() (agentic.Result, bool) { return d.result, d.complete }
 
 // assistantEvent renders one assistant turn.
 //
