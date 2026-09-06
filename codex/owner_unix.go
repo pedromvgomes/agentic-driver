@@ -40,3 +40,9 @@ func privateToCaller(info fs.FileInfo) bool {
 // callerID names the user in a directory name, so two accounts on one host
 // never contend for the same path.
 func callerID() int { return os.Getuid() }
+
+// schemaRoot is the directory the schema directory is created under.
+//
+// The system temporary directory is shared between accounts here, which is why
+// the directory beneath it carries a uid and is checked before it is used.
+func schemaRoot() (string, error) { return os.TempDir(), nil }

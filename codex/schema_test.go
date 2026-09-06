@@ -506,39 +506,95 @@ func TestASchemaReapedBetweenRunsIsRepublished(t *testing.T) {
 	}
 }
 
-// Runs sharing a schema arrive together, and the file has to be published once
-// and readable by all of them — never half-written, and never a path one run
-// hands to codex while another is still creating it.
-func TestConcurrentRunsSharingASchemaPublishItOnce(t *testing.T) {
+// Runs sharing a schema arrive together, and every one of them has to end up
+// with a complete file to hand codex.
+//
+// What holds this together is the rename, not the lock: a reader sees the whole
+// previous file or the whole new one, so however many writers converge on a
+// name, none of them can be caught reading a half-written schema. The lock only
+// removes the duplicated work, which is why this asserts on what every run
+// receives rather than on how many times it was written.
+func TestConcurrentRunsSharingASchemaAllReceiveIt(t *testing.T) {
 	removeSchemaFile(t, schema)
 
 	p := New()
-	paths := make([]string, 8)
+	argv := make([][]string, 8)
 	var wg sync.WaitGroup
-	for i := range paths {
+	for i := range argv {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			args, err := p.SchemaArgs(schema)
 			if err != nil {
+				// Errorf, not Fatalf: only the test's own goroutine may stop it.
 				t.Errorf("SchemaArgs: %v", err)
 				return
 			}
-			paths[i] = schemaPath(t, args)
+			argv[i] = args
 		}()
 	}
 	wg.Wait()
 
-	for i, path := range paths {
-		written, err := os.ReadFile(path)
+	for i, args := range argv {
+		if args == nil {
+			continue
+		}
+		written, err := os.ReadFile(schemaPath(t, args))
 		if err != nil {
 			t.Fatalf("run %d names an unreadable schema: %v", i, err)
 		}
 		if string(written) != string(schema) {
 			t.Errorf("run %d sees %s, want the requested schema", i, written)
 		}
-		if path != paths[0] {
-			t.Errorf("run %d published to %s, run 0 to %s", i, path, paths[0])
+	}
+}
+
+// Publishing that cannot write reports it, and leaves nothing half-made behind.
+//
+// The temporary file is the step between a directory that holds the old schema
+// and one that holds the new; a failure anywhere in it must reclaim that name,
+// or a directory named for content accumulates files named for nothing.
+func TestPublishingThatFailsLeavesNothingBehind(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skipf("cannot make a read-only directory here: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := publish(filepath.Join(dir, "schema.json"), schema)
+	if err == nil {
+		t.Fatal("publishing into a read-only directory reported success")
+	}
+
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("reading the directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
 		}
+		t.Errorf("directory holds %q, want nothing left from a failed publish", names)
+	}
+}
+
+// A path that cannot be inspected is reported as itself. Falling through to the
+// write would report whatever that failed with, naming a temporary file that
+// has nothing to do with the obstruction.
+func TestPublishingReportsWhyItCannotInspectThePath(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.Mkdir(blocked, 0o000); err != nil {
+		t.Fatalf("preparing an unreadable directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+
+	err := publish(filepath.Join(blocked, "under", "schema.json"), schema)
+	if err == nil {
+		t.Skip("this filesystem does not enforce the directory mode")
+	}
+	if !strings.Contains(err.Error(), "inspecting") {
+		t.Errorf("error = %v, want it to name the path it could not inspect", err)
 	}
 }

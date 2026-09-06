@@ -33,6 +33,19 @@ jobs:
           go vet ./...
           go vet -tags integration ./...
 
+      # Files behind `//go:build !unix` are excluded from the build set on this
+      # runner entirely — not compiled, not vetted, not type-checked. They rot
+      # for the same reason a tag nobody sets does, and the failure is worse:
+      # the code that only runs off unix is the code nobody exercises by hand
+      # either. Cross-compiling needs no second runner.
+      - name: Build for a non-unix platform
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build ./...
+          go vet ./...
+
       - name: Check formatting
         run: |
           unformatted=$(gofmt -l .)

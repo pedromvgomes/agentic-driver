@@ -19,7 +19,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,11 +41,14 @@ const BinaryName = "codex"
 
 // Provider is the Codex dialect.
 type Provider struct {
-	// publishing serialises work on one schema file, keyed by its name.
+	// publishing holds one lock per schema file, keyed by its name.
 	//
-	// Runs sharing a schema are the workload this exists for, and they arrive
-	// together: without a gate per file they all find it missing at the same
-	// moment and race to write what the first of them was already writing.
+	// It saves work and nothing else. Correctness across concurrent runs comes
+	// from publishing through a rename, which is atomic and which converges
+	// whichever writer lands last, and that holds between processes too where a
+	// lock could not reach. What the lock removes is the redundancy: runs
+	// sharing a schema arrive together, and without it each one writes what its
+	// siblings are writing at the same moment.
 	publishing sync.Map
 }
 
@@ -171,8 +176,12 @@ func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
 	name := hex.EncodeToString(sum[:]) + ".json"
 
 	// One publisher at a time per schema, so a fan-out of runs sharing one does
-	// the work once instead of every goroutine repeating it.
-	gate, _ := p.publishing.LoadOrStore(name, new(sync.Mutex))
+	// the work once instead of every goroutine repeating it. Loaded before
+	// LoadOrStore so the common path does not allocate a lock it discards.
+	gate, ok := p.publishing.Load(name)
+	if !ok {
+		gate, _ = p.publishing.LoadOrStore(name, new(sync.Mutex))
+	}
 	lock := gate.(*sync.Mutex)
 	lock.Lock()
 	defer lock.Unlock()
@@ -182,6 +191,12 @@ func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
 	// its own earlier work would name a file that had since been reaped and go
 	// on naming it for as long as it lived. Confirming costs two syscalls and a
 	// read of a small file, against a run that is about to spawn a subprocess.
+	//
+	// The confirmation is of what is on disk NOW, not of what codex will open.
+	// Codex takes a path, so nothing here can hand it a descriptor, and a writer
+	// sharing this user's authority — the agent this driver is about to spawn
+	// among them — can still replace the file in between. The directory keeps
+	// out everyone else; within one account this is a shared file by design.
 	dir, err := p.schemaDir()
 	if err != nil {
 		return nil, fmt.Errorf("%w: codex: %w", agentic.ErrProviderUnavailable, err)
@@ -203,7 +218,12 @@ func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
 // refused rather than used, because everything downstream treats a file found
 // there as this process's own.
 func (p *Provider) schemaDir() (string, error) {
-	dir := filepath.Join(os.TempDir(), fmt.Sprintf("%s-%d", schemaDirName, callerID()))
+	root, err := schemaRoot()
+	if err != nil {
+		return "", err
+	}
+
+	dir := filepath.Join(root, fmt.Sprintf("%s-%d", schemaDirName, callerID()))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("making a directory for the schema: %w", err)
 	}
@@ -241,6 +261,12 @@ func (p *Provider) schemaDir() (string, error) {
 // before the model ever ran.
 func publish(path string, content []byte) error {
 	switch info, err := os.Lstat(path); {
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		// Anything other than absence is reported as itself. Falling through
+		// would report whatever the write failed with instead, naming a
+		// temporary file that has nothing to do with the obstruction.
+		return fmt.Errorf("inspecting %s: %w", path, err)
+
 	case err == nil && info.Mode().IsRegular():
 		if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, content) {
 			return nil

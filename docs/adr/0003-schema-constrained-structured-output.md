@@ -6,28 +6,30 @@ prompt insisting on `4`, each returns a conforming document. So `Request.Schema`
 across providers, and a caller can fan out N reviewer runs over a diff and unmarshal what
 comes back.
 
-It is a **capability**, gated by `SchemaConstrainer` and refused with `ErrSchemaUnsupported`
-before a process starts, for the reason every gate here exists: a dropped schema fails
-silently and in the direction that looks like success. The run answers the prompt in prose,
-competently, and nothing in the reply marks the constraint as never applied — the caller
-finds out wherever it tries to unmarshal that prose, which is somewhere else entirely.
+It is a **capability**, gated by `SchemaConstrainer` and refused with
+`ErrSchemaUnsupported` before a process starts, for the reason every gate here exists: a
+dropped schema fails silently and in the direction that looks like success. The run
+answers the prompt in prose, competently, and nothing in the reply marks the constraint as
+never applied — the caller finds out wherever it tries to unmarshal that prose, which is
+somewhere else entirely.
 
 The two CLIs constrain by different mechanisms, and the mechanisms fail differently. Codex
-constrains the decoder itself: `--output-schema` yields a final `agent_message` that cannot
-be invalid JSON, though it can be schema-valid nonsense — padding a `minItems: 7` array with
-`":["` — and a schema nothing satisfies makes the run generate until it hits its output
-ceiling, reconnect until it gives up, and report `turn.failed`. Claude Code offers the model
-a tool, `StructuredOutput`, validates each call against the schema, feeds `Output does not
-match required schema` back and lets it retry. When it gives up it answers in prose on **exit
-0**, with `is_error: false`, `subtype: "success"`, and no `structured_output` field.
+constrains the decoder itself: `--output-schema` yields a final `agent_message` that
+cannot be invalid JSON, though it can be schema-valid nonsense — padding a `minItems: 7`
+array with `":["` — and a schema nothing satisfies makes the run generate until it hits
+its output ceiling, reconnect until it gives up, and report `turn.failed`. Claude Code
+offers the model a tool, `StructuredOutput`, validates each call against the schema, feeds
+`Output does not match required schema` back and lets it retry. When it gives up it
+answers in prose on **exit 0**, with `is_error: false`, `subtype: "success"`, and no
+`structured_output` field.
 
 That last case is the one this record exists for. Taken at the CLI's word it is a clean
 success whose `Text` happens not to be JSON, and every downstream caller inherits the
 problem. So a run given a schema that produces no payload is reported as an **unmet
 constraint**: populated `Result`, nil error, `IsError` set, `Structured` nil, and `Text`
 carrying whatever account there is of why it could not answer in the required shape. It is
-the only verdict the library reaches on its own, and it is deliberately not an outage — the
-run happened, it cost money, and the agent's explanation is worth reading.
+the only verdict the library reaches on its own, and it is deliberately not an outage —
+the run happened, it cost money, and the agent's explanation is worth reading.
 
 Judging it needs the request, so `NewDecoder()` becomes `NewDecoder(Request)`. This amends
 ADR 0001, which established the mandatory interface. A decoder is already documented as
@@ -36,27 +38,44 @@ authoritative signal rather than a shared guess: claudecode checks whether the e
 carries `structured_output`, codex whether the final agent message is a document.
 
 The schema reaches each CLI differently — claude takes it inline, codex takes a path — so
-the codex provider writes the file itself, named for the SHA-256 of its contents. The digest
-is what keeps a file from being a per-run side effect: the same schema always renders the
-same argv, two runs sharing a schema share the file, and there is nothing per-run left
-behind for anyone to reclaim.
+the codex provider writes the file itself, named for the SHA-256 of its contents. The
+digest is what keeps a file from being a per-run side effect: the same schema always
+renders the same argv, two runs sharing a schema share the file, and there is nothing
+per-run left behind for anyone to reclaim.
 
-The digest names the file; it does not vouch for it. `TMPDIR` is shared between accounts on
-a Unix host, and creating a directory succeeds on one that already exists whoever owns it —
-so the directory is per-user, and refused unless it is a directory this user owns that no
-other user can read, write or enter. Within it, a path that already exists is read and
-compared against the schema rather than trusted for having the right name, because a name is
-something anything able to write the directory could have chosen, and a run constrained to a
-schema nobody asked for still answers, in valid JSON, with nothing to mark it wrong. It is
-confirmed on every run rather than remembered: a temporary directory is swept by the system,
-and a process trusting its own earlier work would go on naming a file that had been reaped.
+The digest names the file; it does not vouch for it. `TMPDIR` is shared between accounts
+on a Unix host, and creating a directory succeeds on one that already exists whoever owns
+it — so the directory is per-user, and refused unless it is a directory this user owns
+that no other user can read, write or enter. Within it, a path that already exists is read
+and compared against the schema rather than trusted for having the right name, because a
+name is something anything able to write the directory could have chosen, and a run
+constrained to a schema nobody asked for still answers, in valid JSON, with nothing to
+mark it wrong. It is confirmed on every run rather than remembered: a temporary directory
+is swept by the system, and a process trusting its own earlier work would go on naming a
+file that had been reaped.
 
 Both checks read a permission model only some platforms have, so both sit behind the build
-tag that already splits process handling. Where `fs.FileInfo` carries a mode synthesised from
-file attributes rather than an access-control list, every directory reports `0777` and a
-permission test would refuse the directory it had just created; there the separation rests on
-the platform giving each account its own temporary directory, as Windows does. A platform
-that shares one between accounts would get no protection from this package.
+tag that already splits process handling — and so does the directory they run against.
+Where `fs.FileInfo` carries a mode synthesised from file attributes rather than an
+access-control list, every directory reports `0777` and a permission test would refuse the
+directory it had just created; there the file goes under the per-account cache directory
+instead, so the separation the checks establish by hand on unix is the operating system's
+own answer elsewhere. Trusting the system temporary directory there would not do: a
+service or scheduled task runs without an interactive profile, and its temporary directory
+is machine-wide.
+
+Concurrent runs are made safe by the rename rather than by a lock. A rename is atomic and
+converges whichever writer lands last, which holds between processes as well as within
+one, where a lock could not reach. A lock per schema is kept anyway, and it buys exactly
+one thing: runs sharing a schema arrive together, and without it each writes what its
+siblings are writing at that moment.
+
+What the verification does NOT cover is the gap between publishing the file and codex
+opening it. Codex takes a path, so nothing here can hand it a descriptor, and a writer
+holding this user's authority — the agent this driver is about to spawn among them — can
+still replace the file in between. The directory keeps out every other account; within one
+account the file is shared by design, and that is the cost of an argv that is a function
+of the request.
 
 ## Considered options
 
@@ -92,18 +111,18 @@ is.
 ## Consequences
 
 `Result` grows `Structured` and stops being comparable with `==`, so equality is
-`reflect.DeepEqual`. Callers comparing two results, using one as a map key, or embedding one
-in a comparable struct are affected.
+`reflect.DeepEqual`. Callers comparing two results, using one as a map key, or embedding
+one in a comparable struct are affected.
 
 Schema files are never removed. They accumulate one per distinct schema per user, in a
-directory the operating system reclaims with the rest of `TMPDIR`, and that is the price of
-an argv that is a function of the request rather than of the moment it was built.
+directory the operating system reclaims with the rest of `TMPDIR`, and that is the price
+of an argv that is a function of the request rather than of the moment it was built.
 
 `Request.Schema` is read as set-or-not, not as empty-or-not. An empty schema is a question
 about shape nobody managed to phrase, and treating it as no question would let it past the
-capability gate, the provider and both decoders to arrive as a clean unconstrained success.
-A schema must also be a JSON object, which rules out the literal `null` that marshalling a
-nil value produces.
+capability gate, the provider and both decoders to arrive as a clean unconstrained
+success. A schema must also be a JSON object, which rules out the literal `null` that
+marshalling a nil value produces.
 
 A sandbox refusal on a schema-constrained run is an unmet constraint, not a refusal.
 Refusing is a successful verdict about authority; the schema asks about shape, and the run
@@ -118,5 +137,5 @@ account of its own behaviour.
 
 `StructuredOutput` is exempt from Claude Code's `--allowedTools`, so a run restricted to
 `Read` still answers in the required shape. `PermissionArgs` and `SchemaArgs` therefore do
-not reconcile, and a test pins that: refusing the combination would refuse requests the CLI
-honours perfectly well.
+not reconcile, and a test pins that: refusing the combination would refuse requests the
+CLI honours perfectly well.
