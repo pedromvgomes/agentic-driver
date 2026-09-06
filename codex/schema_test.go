@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
@@ -59,6 +60,10 @@ func TestSchemaArgsWritesTheSchemaItNames(t *testing.T) {
 func removeSchemaFile(t *testing.T, schema json.RawMessage) string {
 	t.Helper()
 
+	// The published path is a function of TMPDIR, and every test here would
+	// otherwise share one absolute path with any concurrent run of this package.
+	t.Setenv("TMPDIR", t.TempDir())
+
 	dir, err := (&Provider{}).schemaDir()
 	if err != nil {
 		t.Fatalf("schemaDir: %v", err)
@@ -68,7 +73,6 @@ func removeSchemaFile(t *testing.T, schema json.RawMessage) string {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("clearing %s: %v", path, err)
 	}
-	t.Cleanup(func() { _ = os.Remove(path) })
 	return path
 }
 
@@ -199,6 +203,11 @@ func TestATruncatedAnswerIsAnUnmetConstraintOnASuccessfulTurn(t *testing.T) {
 	}
 	if result.Structured != nil {
 		t.Errorf("Structured = %s, want nil", result.Structured)
+	}
+	// The half-document is what codex said, and it is what a caller needs to
+	// see; reporting the failure without it explains nothing.
+	if !strings.Contains(result.Text, "trunc") {
+		t.Errorf("Text = %q, want the answer codex actually produced", result.Text)
 	}
 }
 
@@ -450,5 +459,86 @@ func TestASchemaFileCodexCannotReadLeavesNoResultToReport(t *testing.T) {
 	// driver's own error says only that a run produced nothing.
 	if !strings.Contains(string(stderr), schemaDirName) || !strings.Contains(string(stderr), ".json") {
 		t.Errorf("stderr = %q, want it to name the schema file the driver passed", stderr)
+	}
+}
+
+// A directory standing at the schema's name cannot be renamed over, so leaving
+// it would make that one schema permanently unusable for as long as it sat
+// there.
+func TestADirectoryAtTheSchemaNameIsReplaced(t *testing.T) {
+	path := removeSchemaFile(t, schema)
+
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("planting a directory: %v", err)
+	}
+	if _, err := New().SchemaArgs(schema); err != nil {
+		t.Fatalf("SchemaArgs: %v", err)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the schema: %v", err)
+	}
+	if string(written) != string(schema) {
+		t.Errorf("file holds %s, want the requested schema", written)
+	}
+}
+
+// A temporary directory is swept by the system, so a provider that remembered
+// its own earlier work would keep naming a file that had since been reaped.
+func TestASchemaReapedBetweenRunsIsRepublished(t *testing.T) {
+	path := removeSchemaFile(t, schema)
+
+	p := New()
+	if _, err := p.SchemaArgs(schema); err != nil {
+		t.Fatalf("SchemaArgs: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("reaping the schema: %v", err)
+	}
+
+	args, err := p.SchemaArgs(schema)
+	if err != nil {
+		t.Fatalf("SchemaArgs after the file was reaped: %v", err)
+	}
+	if _, err := os.ReadFile(schemaPath(t, args)); err != nil {
+		t.Errorf("the argv names a file that does not exist: %v", err)
+	}
+}
+
+// Runs sharing a schema arrive together, and the file has to be published once
+// and readable by all of them — never half-written, and never a path one run
+// hands to codex while another is still creating it.
+func TestConcurrentRunsSharingASchemaPublishItOnce(t *testing.T) {
+	removeSchemaFile(t, schema)
+
+	p := New()
+	paths := make([]string, 8)
+	var wg sync.WaitGroup
+	for i := range paths {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			args, err := p.SchemaArgs(schema)
+			if err != nil {
+				t.Errorf("SchemaArgs: %v", err)
+				return
+			}
+			paths[i] = schemaPath(t, args)
+		}()
+	}
+	wg.Wait()
+
+	for i, path := range paths {
+		written, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("run %d names an unreadable schema: %v", i, err)
+		}
+		if string(written) != string(schema) {
+			t.Errorf("run %d sees %s, want the requested schema", i, written)
+		}
+		if path != paths[0] {
+			t.Errorf("run %d published to %s, run 0 to %s", i, path, paths[0])
+		}
 	}
 }

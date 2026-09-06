@@ -39,10 +39,12 @@ const BinaryName = "codex"
 
 // Provider is the Codex dialect.
 type Provider struct {
-	// published records the schema files this provider has already written and
-	// verified, keyed by file name, so a caller fanning out many runs over one
-	// schema pays for the directory checks and the write once.
-	published sync.Map
+	// publishing serialises work on one schema file, keyed by its name.
+	//
+	// Runs sharing a schema are the workload this exists for, and they arrive
+	// together: without a gate per file they all find it missing at the same
+	// moment and race to write what the first of them was already writing.
+	publishing sync.Map
 }
 
 // New builds the provider.
@@ -168,13 +170,18 @@ func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
 	// to a shape nobody asked it for.
 	name := hex.EncodeToString(sum[:]) + ".json"
 
-	// A schema already published by this process is already verified, and the
-	// directory it sits in admits nobody else, so the work is done once per
-	// distinct schema however wide a caller fans out.
-	if path, ok := p.published.Load(name); ok {
-		return []string{"--output-schema", path.(string)}, nil
-	}
+	// One publisher at a time per schema, so a fan-out of runs sharing one does
+	// the work once instead of every goroutine repeating it.
+	gate, _ := p.publishing.LoadOrStore(name, new(sync.Mutex))
+	lock := gate.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
 
+	// The file is checked on every run rather than remembered as published. A
+	// temporary directory is swept by the system, and a process that trusted
+	// its own earlier work would name a file that had since been reaped and go
+	// on naming it for as long as it lived. Confirming costs two syscalls and a
+	// read of a small file, against a run that is about to spawn a subprocess.
 	dir, err := p.schemaDir()
 	if err != nil {
 		return nil, fmt.Errorf("%w: codex: %w", agentic.ErrProviderUnavailable, err)
@@ -183,8 +190,6 @@ func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
 	if err := publish(path, schema); err != nil {
 		return nil, fmt.Errorf("%w: codex: writing the schema: %w", agentic.ErrProviderUnavailable, err)
 	}
-
-	p.published.Store(name, path)
 	return []string{"--output-schema", path}, nil
 }
 
@@ -214,7 +219,7 @@ func (p *Provider) schemaDir() (string, error) {
 		return "", fmt.Errorf("%s is not a directory", dir)
 	case !ownedByCaller(info):
 		return "", fmt.Errorf("%s belongs to another user", dir)
-	case info.Mode().Perm()&0o077 != 0:
+	case !privateToCaller(info):
 		return "", fmt.Errorf("%s is open to other users (mode %#o)", dir, info.Mode().Perm())
 	}
 	return dir, nil
@@ -225,17 +230,27 @@ func (p *Provider) schemaDir() (string, error) {
 // The existing file is READ rather than merely found: a name that is a digest
 // says what the contents must be, not what they are, and the difference is
 // everything on a machine where something else could have created the file
-// first. Anything that is not a regular file holding exactly these bytes — a
-// symlink, a directory, a stale or planted document — is replaced.
+// first. A stale or planted document is replaced, and so is anything at the
+// name that is not a regular file — a symlink, which would otherwise send codex
+// to read whatever it points at, or a directory, which a rename cannot write
+// over at all.
 //
 // The replacement is written under a temporary name and renamed into place, so
 // a concurrent run reads either the previous complete file or this one and
 // never a half-written document, which codex would reject as malformed JSON
-// before the model ever ran. Rename replaces a symlink itself rather than
-// following it to write somewhere else.
+// before the model ever ran.
 func publish(path string, content []byte) error {
-	if current, err := readRegular(path); err == nil && bytes.Equal(current, content) {
-		return nil
+	switch info, err := os.Lstat(path); {
+	case err == nil && info.Mode().IsRegular():
+		if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, content) {
+			return nil
+		}
+	case err == nil:
+		// Removing a symlink removes the link and not its target, so nothing
+		// outside this directory is touched.
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".schema-*")
@@ -255,20 +270,6 @@ func publish(path string, content []byte) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
-}
-
-// readRegular reads a path only if it is a regular file, so a symlink or a
-// directory standing at the schema's name reports no content rather than
-// content read from somewhere else.
-func readRegular(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	return os.ReadFile(path)
 }
 
 // AuthEnv carries an OpenAI key.

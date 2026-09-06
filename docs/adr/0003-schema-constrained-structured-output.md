@@ -12,23 +12,22 @@ silently and in the direction that looks like success. The run answers the promp
 competently, and nothing in the reply marks the constraint as never applied — the caller
 finds out wherever it tries to unmarshal that prose, which is somewhere else entirely.
 
-The two CLIs constrain by different mechanisms, and the mechanisms fail differently.
-Codex constrains the decoder itself: `--output-schema` yields a final `agent_message` that
-cannot be invalid JSON, though it can be schema-valid nonsense — padding a `minItems: 7`
-array with `":["` — and a schema nothing satisfies makes the run generate until it hits its
-output ceiling, reconnect until it gives up, and report `turn.failed`. Claude Code offers the model
-a tool, `StructuredOutput`, validates each call against the schema, feeds
-`Output does not match required schema` back and lets it retry. When it gives up it answers
-in prose on **exit 0**, with `is_error: false`, `subtype: "success"`, and no
-`structured_output` field.
+The two CLIs constrain by different mechanisms, and the mechanisms fail differently. Codex
+constrains the decoder itself: `--output-schema` yields a final `agent_message` that cannot
+be invalid JSON, though it can be schema-valid nonsense — padding a `minItems: 7` array with
+`":["` — and a schema nothing satisfies makes the run generate until it hits its output
+ceiling, reconnect until it gives up, and report `turn.failed`. Claude Code offers the model
+a tool, `StructuredOutput`, validates each call against the schema, feeds `Output does not
+match required schema` back and lets it retry. When it gives up it answers in prose on **exit
+0**, with `is_error: false`, `subtype: "success"`, and no `structured_output` field.
 
 That last case is the one this record exists for. Taken at the CLI's word it is a clean
 success whose `Text` happens not to be JSON, and every downstream caller inherits the
-problem. So a run given a schema that produces no payload is reported as an **unmet constraint**:
-populated `Result`, nil error, `IsError` set, `Structured` nil, and `Text` carrying
-whatever account there is of why it could not answer in the required shape. It is the only
-verdict the library reaches on its own, and it is deliberately not an outage — the run
-happened, it cost money, and the agent's explanation is worth reading.
+problem. So a run given a schema that produces no payload is reported as an **unmet
+constraint**: populated `Result`, nil error, `IsError` set, `Structured` nil, and `Text`
+carrying whatever account there is of why it could not answer in the required shape. It is
+the only verdict the library reaches on its own, and it is deliberately not an outage — the
+run happened, it cost money, and the agent's explanation is worth reading.
 
 Judging it needs the request, so `NewDecoder()` becomes `NewDecoder(Request)`. This amends
 ADR 0001, which established the mandatory interface. A decoder is already documented as
@@ -45,10 +44,19 @@ behind for anyone to reclaim.
 The digest names the file; it does not vouch for it. `TMPDIR` is shared between accounts on
 a Unix host, and creating a directory succeeds on one that already exists whoever owns it —
 so the directory is per-user, and refused unless it is a directory this user owns that no
-other user can write. Within it, a path that already exists is read and compared against the
-schema rather than trusted for having the right name, because a name is something anything
-able to write the directory could have chosen, and a run constrained to a schema nobody
-asked for still answers, in valid JSON, with nothing to mark it wrong.
+other user can read, write or enter. Within it, a path that already exists is read and
+compared against the schema rather than trusted for having the right name, because a name is
+something anything able to write the directory could have chosen, and a run constrained to a
+schema nobody asked for still answers, in valid JSON, with nothing to mark it wrong. It is
+confirmed on every run rather than remembered: a temporary directory is swept by the system,
+and a process trusting its own earlier work would go on naming a file that had been reaped.
+
+Both checks read a permission model only some platforms have, so both sit behind the build
+tag that already splits process handling. Where `fs.FileInfo` carries a mode synthesised from
+file attributes rather than an access-control list, every directory reports `0777` and a
+permission test would refuse the directory it had just created; there the separation rests on
+the platform giving each account its own temporary directory, as Windows does. A platform
+that shares one between accounts would get no protection from this package.
 
 ## Considered options
 

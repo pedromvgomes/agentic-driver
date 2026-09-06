@@ -141,12 +141,14 @@ a failed turn.
 
 Either way the outcome is the same to a caller: `IsError` set, `Structured` nil,
 and `Text` carrying whatever account there is — the agent's own on Claude Code,
-codex's on a turn it failed. That is an **unmet constraint**: a verdict, not an
-outage, because the run happened and the explanation is worth reading.
+codex's own on a turn it failed, and a line the library supplies when codex
+completes a turn having produced no answer at all. That is an **unmet
+constraint**: a verdict, not an outage, because the run happened and whatever
+account exists is worth reading.
 
-A sandbox refusal on a schema-constrained run lands here too. Refusing is a
-successful verdict about authority, but it still leaves the caller without the
-shape it asked for, so the constraint is what the outcome reports.
+A sandbox refusal on a schema-constrained run is an **unmet constraint** too.
+Refusing is a successful verdict about authority, but it still leaves the caller
+without the shape it asked for, and the shape is what this outcome reports.
 
 `Result` carries a `json.RawMessage` and so is not comparable with `==`; compare
 with `reflect.DeepEqual`.
