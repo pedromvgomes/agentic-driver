@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -138,6 +139,17 @@ func (p *dialect) text(env envelope) string {
 	return ""
 }
 
+// isPayload reports whether structured_output carries an answer.
+//
+// The field is absent on a run that gave up on the shape. A JSON null is not an
+// answer either: a caller unmarshalling it gets the zero value of whatever it
+// decoded into and no sign that anything went wrong, which is precisely the
+// outcome the schema was there to rule out.
+func isPayload(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+}
+
 // unreadable explains a run whose stdout is not an envelope.
 //
 // Everything it can observe means the same thing: the invocation could not be
@@ -174,7 +186,7 @@ type streamEvent struct {
 
 // NewDecoder returns a decoder for one run.
 func (p *dialect) NewDecoder(req agentic.Request) agentic.Decoder {
-	return &decoder{dialect: p, schema: len(req.Schema) > 0}
+	return &decoder{dialect: p, schema: req.Schema != nil}
 }
 
 // decoder folds one run of `--output-format stream-json --verbose`.
@@ -223,12 +235,19 @@ func (d *decoder) Decode(line []byte) (agentic.Event, error) {
 		if err != nil {
 			return agentic.Event{}, err
 		}
-		if d.schema && len(result.Structured) == 0 {
+		// Structured answers a constraint, so a run that carried none has none.
+		// Parse reports the envelope as it stands, which is the right job for
+		// something a caller can invoke on a document directly; deciding what
+		// the run was ASKED for belongs to the only thing that knows.
+		if !d.schema {
+			result.Structured = nil
+		} else if !isPayload(result.Structured) {
 			// The CLI calls this a success: exit 0, is_error false, subtype
 			// "success", and a result field holding the agent's prose account
 			// of why it could not satisfy the schema. It is not a success to a
 			// caller that asked for JSON, and nothing else in the envelope
 			// marks it, so the verdict is corrected here.
+			result.Structured = nil
 			result.IsError = true
 		}
 		d.result, d.complete = result, true

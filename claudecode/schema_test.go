@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"bytes"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -8,6 +9,32 @@ import (
 
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
+
+// foldEnvelope runs one committed envelope through a decoder the way the driver
+// runs the terminal line of a stream.
+//
+// The envelope fixtures are pretty-printed, as every envelope fixture here is,
+// so they are compacted first: a decoder consumes one line at a time because
+// that is what a stream delivers, and the document is the same document either
+// way.
+func foldEnvelope(t *testing.T, p *Provider, name string, req agentic.Request) agentic.Result {
+	t.Helper()
+
+	var line bytes.Buffer
+	if err := json.Compact(&line, golden(t, name)); err != nil {
+		t.Fatalf("compacting %s: %v", name, err)
+	}
+
+	decoder := p.NewDecoder(req)
+	if _, err := decoder.Decode(line.Bytes()); err != nil {
+		t.Fatalf("Decode(%s): %v", name, err)
+	}
+	result, ok := decoder.Result()
+	if !ok {
+		t.Fatalf("%s produced no result", name)
+	}
+	return result
+}
 
 var schema = json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`)
 
@@ -67,11 +94,7 @@ func TestAConstrainedRunAnswersInStructured(t *testing.T) {
 	p := testProvider(t)
 	req := agentic.Request{Prompt: "hi", Schema: schema}
 
-	_, decoder := events(t, p, golden(t, "structured.json"), req)
-	result, ok := decoder.Result()
-	if !ok {
-		t.Fatal("the run reported no result")
-	}
+	result := foldEnvelope(t, p, "structured.json", req)
 	if result.IsError {
 		t.Errorf("IsError = true, want a constrained run that answered to be a clean verdict: %+v", result)
 	}
@@ -107,11 +130,7 @@ func TestARunThatGaveUpOnTheShapeIsABadVerdict(t *testing.T) {
 			env.IsError, env.Subtype)
 	}
 
-	_, decoder := events(t, p, raw, agentic.Request{Prompt: "hi", Schema: schema})
-	result, ok := decoder.Result()
-	if !ok {
-		t.Fatal("the run reported no result")
-	}
+	result := foldEnvelope(t, p, "structured-unmet.json", agentic.Request{Prompt: "hi", Schema: schema})
 	if !result.IsError {
 		t.Error("IsError = false, want a run that produced no payload reported as a bad verdict")
 	}
@@ -128,8 +147,7 @@ func TestARunThatGaveUpOnTheShapeIsABadVerdict(t *testing.T) {
 func TestTheSameEnvelopeIsCleanWhenNoSchemaWasAskedFor(t *testing.T) {
 	p := testProvider(t)
 
-	_, decoder := events(t, p, golden(t, "structured-unmet.json"), agentic.Request{Prompt: "hi"})
-	result, _ := decoder.Result()
+	result := foldEnvelope(t, p, "structured-unmet.json", agentic.Request{Prompt: "hi"})
 	if result.IsError {
 		t.Error("IsError = true, want the CLI's own verdict when no schema was required")
 	}
@@ -174,5 +192,43 @@ func TestParseReportsTheEnvelopeWithoutJudgingTheShape(t *testing.T) {
 	}
 	if result.IsError {
 		t.Error("Parse set IsError; only a decoder holding the request may do that")
+	}
+}
+
+// A JSON null satisfies the field's presence and answers nothing: unmarshalling
+// it leaves the caller's value zeroed with no sign anything went wrong, which is
+// the outcome the schema was there to rule out.
+func TestANullPayloadIsNotAnAnswer(t *testing.T) {
+	p := testProvider(t)
+
+	line := []byte(`{"type":"result","subtype":"success","is_error":false,` +
+		`"session_id":"77777777-7777-4777-8777-777777777777",` +
+		`"result":"prose","structured_output":null,"num_turns":2}`)
+
+	decoder := p.NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	if _, err := decoder.Decode(line); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	result, _ := decoder.Result()
+	if !result.IsError {
+		t.Error("IsError = false on a run whose payload is null")
+	}
+	if result.Structured != nil {
+		t.Errorf("Structured = %s, want nil", result.Structured)
+	}
+}
+
+// Structured answers a constraint, so a run that carried none has none. The two
+// providers have to agree about that, or the field means one thing on Claude
+// Code and another on codex.
+func TestAnUnconstrainedRunHasNoStructuredAnswer(t *testing.T) {
+	p := testProvider(t)
+
+	result := foldEnvelope(t, p, "structured.json", agentic.Request{Prompt: "hi"})
+	if result.Structured != nil {
+		t.Errorf("Structured = %s, want nil when no schema was asked for", result.Structured)
+	}
+	if result.IsError {
+		t.Error("IsError = true, want an unconstrained run to keep the CLI's own verdict")
 	}
 }

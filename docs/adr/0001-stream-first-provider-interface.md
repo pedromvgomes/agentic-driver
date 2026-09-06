@@ -1,5 +1,8 @@
 # Every provider streams, and Run is a fold over Stream
 
+*Amended by ADR 0003: `NewDecoder` takes the `Request`, so a per-run decoder knows what its
+run was required to produce.*
+
 Codex has no result envelope: `codex exec --json` emits JSONL from the first line to the
 last, and `-o/--output-last-message` writes bare text to a file rather than a document to
 stdout. A `Result` for codex therefore exists only as a fold over a whole run — the session

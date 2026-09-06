@@ -1,4 +1,4 @@
-{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}
+{"type":"thread.started","thread_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
 {"type":"turn.started"}
 {"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: Incomplete response returned, reason: max_output_tokens)"}
 {"type":"error","message":"Reconnecting... 3/5 (stream disconnected before completion: Incomplete response returned, reason: max_output_tokens)"}

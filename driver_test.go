@@ -655,6 +655,45 @@ func TestASchemaReachesAProviderThatCanConstrainOutput(t *testing.T) {
 	}
 }
 
+// A schema that was SET but holds nothing is still a request to be answered in
+// a shape. Measuring its length instead of its presence would let the empty case
+// past this gate, past the provider and past both decoders, to arrive as a clean
+// unconstrained success — the silent drop the gate exists to prevent, reached
+// through the gate itself.
+func TestAnEmptySchemaIsRefusedRatherThanIgnored(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &constraining{}, fake)
+
+	_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage{}})
+	if !errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Errorf("error = %v, want ErrInvalidRequest", err)
+	}
+	if fake.Ran() {
+		t.Error("the CLI was spawned for a schema that describes nothing")
+	}
+}
+
+// A JSON Schema is an object. The document this rules out that looks harmless is
+// the literal null, which is what marshalling a nil value produces — so a caller
+// whose schema came from an unset pointer learns that here, rather than being
+// told the run failed to answer in a shape it never described.
+func TestASchemaThatIsNotAnObjectIsRefused(t *testing.T) {
+	for _, schema := range []string{`null`, `[]`, `"a string"`, `42`} {
+		t.Run(schema, func(t *testing.T) {
+			fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+			d := driver(t, &constraining{}, fake)
+
+			_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage(schema)})
+			if !errors.Is(err, agentic.ErrInvalidRequest) {
+				t.Errorf("error = %v, want ErrInvalidRequest", err)
+			}
+			if fake.Ran() {
+				t.Error("the CLI was spawned for a document that cannot be a schema")
+			}
+		})
+	}
+}
+
 // Checked once, in the driver, so the same typo does not become a usage error
 // on one CLI and a rejected turn on another.
 func TestASchemaThatIsNotJSONIsRefusedBeforeAnythingRuns(t *testing.T) {

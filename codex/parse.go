@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"encoding/json"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
@@ -31,7 +32,7 @@ type event struct {
 
 // NewDecoder returns a decoder for one run.
 func (p *Provider) NewDecoder(req agentic.Request) agentic.Decoder {
-	return &decoder{schema: len(req.Schema) > 0}
+	return &decoder{schema: req.Schema != nil}
 }
 
 // decoder folds one run of `codex exec --json`.
@@ -165,7 +166,7 @@ func (d *decoder) Result() (agentic.Result, bool) {
 
 	structured, unmet := d.constrained()
 	return agentic.Result{
-		Text:       d.answer(),
+		Text:       d.answer(unmet),
 		Structured: structured,
 		SessionID:  d.sessionID,
 		// Model is left zero. The stream never names the model that answered,
@@ -191,22 +192,42 @@ func (d *decoder) constrained() (json.RawMessage, bool) {
 	if !d.schema {
 		return nil, false
 	}
-	if d.isError || !json.Valid([]byte(d.text)) {
+	if d.isError || !isPayload([]byte(d.text)) {
 		return nil, true
 	}
 	return json.RawMessage(d.text), false
 }
 
+// isPayload reports whether a final message is an answer in the required shape.
+//
+// A JSON null passes every syntactic test and is not an answer: a caller
+// unmarshalling it gets the zero value of whatever it decoded into and no sign
+// that anything went wrong, which is precisely the outcome the schema was there
+// to rule out.
+func isPayload(text []byte) bool {
+	trimmed := bytes.TrimSpace(text)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	return json.Valid(trimmed)
+}
+
 // answer is the agent's reply, or the explanation for why there is none.
 //
 // A failed turn carries no agent message at all, so returning only the text
-// would report a rejected credential as an empty success.
-func (d *decoder) answer() string {
+// would report a rejected credential as an empty success. An unmet constraint
+// on a turn codex considered fine has no explanation to borrow either — the
+// stream simply never carried an answer — and a Result whose IsError is set
+// beside an empty Text says a run failed without saying anything about it.
+func (d *decoder) answer(unmet bool) string {
 	if d.text != "" {
 		return d.text
 	}
 	if d.isError {
 		return "codex ended the turn: " + d.failure
+	}
+	if unmet {
+		return "codex ended the turn without an answer in the required shape"
 	}
 	return ""
 }

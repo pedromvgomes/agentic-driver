@@ -208,7 +208,7 @@ func (p *dialect) commonArgs(req agentic.Request) ([]string, error) {
 		return nil, err
 	}
 	args = append(args, agentArgs...)
-	if len(req.Schema) > 0 {
+	if req.Schema != nil {
 		schemaArgs, err := p.SchemaArgs(req.Schema)
 		if err != nil {
 			return nil, err

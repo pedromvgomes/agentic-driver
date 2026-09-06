@@ -198,10 +198,11 @@ type TurnLimiter interface {
 type SchemaConstrainer interface {
 	// SchemaArgs returns the arguments that bind the answer to schema.
 	//
-	// The schema is already valid JSON: the driver checks that before any
-	// provider sees it. What remains is dialect, and it differs — one CLI takes
-	// the document inline, another takes a path to it — so a provider that
-	// needs the schema on disk puts it there itself.
+	// The schema is already a well-formed JSON object: the driver checks that
+	// before any provider sees it. What remains is dialect, and it differs —
+	// one CLI takes the document inline, another takes a path to it — so a
+	// provider that needs the schema on disk puts it there itself, and owns
+	// where that file lives and what it can be trusted to hold.
 	//
 	// It returns ErrInvalidRequest for a schema this CLI cannot express, and
 	// ErrProviderUnavailable when the arguments could not be built at all: a
@@ -285,8 +286,13 @@ type Request struct {
 	WorkDir string
 	// Timeout bounds this invocation, overriding the driver's default.
 	Timeout time.Duration
-	// Schema binds the run's final answer to a JSON Schema, or is empty for an
-	// unconstrained answer. It requires a SchemaConstrainer.
+	// Schema binds the run's final answer to a JSON Schema, or is nil for an
+	// unconstrained answer. It must be a JSON object, and it requires a
+	// SchemaConstrainer.
+	//
+	// Set-or-not is the question, not empty-or-not: a schema that was set and
+	// holds nothing is a request to be answered in a shape that nobody managed
+	// to phrase, and it is refused rather than run unconstrained.
 	//
 	// A run carrying one answers in Result.Structured. A run that was given a
 	// schema and produced no payload comes back with IsError set, because a

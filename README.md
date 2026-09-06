@@ -104,10 +104,13 @@ result.Model                       // what answered
 
 ## Structured output
 
-`Request.Schema` binds a run's final answer to a JSON Schema, and it requires a
-provider implementing `SchemaConstrainer` — a provider that cannot constrain
-output refuses the request with `ErrSchemaUnsupported` rather than answering in
-prose nothing marks as unconstrained.
+`Request.Schema` binds a run's final answer to a JSON Schema. It requires a
+provider implementing `SchemaConstrainer`: a request carrying a schema for a
+provider that does not is refused by the driver with `ErrSchemaUnsupported`,
+before a process starts, rather than answering in prose nothing marks as
+unconstrained. Assert on the interface to know whether a provider offers it.
+
+The schema must be a JSON object; anything else is `ErrInvalidRequest`.
 
 ```go
 result, err := driver.Run(ctx, agentic.Request{
@@ -118,22 +121,35 @@ if err != nil {
     return err
 }
 if result.IsError {
-    return fmt.Errorf("the run did not answer in the required shape: %s", result.Text)
+    return fmt.Errorf("the run reported a failure: %s", result.Text)
 }
 json.Unmarshal(result.Structured, &findings)
 ```
 
+`IsError` does not say *why* a run failed, and an unmet constraint is not
+distinguishable from any other bad verdict — a rejected credential and a turn
+that ran out of turns both arrive the same way. `Text` is the only account a
+caller gets, which is why it is worth propagating.
+
 Both CLIs genuinely constrain the answer rather than suggesting a shape: a
 prompt arguing against the schema still comes back conforming. They constrain by
-different mechanisms — codex constrains the decoder, Claude Code validates a tool
-call and retries — and the difference shows up when the model cannot satisfy the
-schema at all. Claude Code eventually answers in prose and reports the run a
-success; codex generates until it hits its output ceiling and reports a failed
-turn.
+different mechanisms — codex constrains the decoder, Claude Code validates a
+tool call and retries — and the difference shows up when the model cannot
+satisfy the schema at all. Claude Code eventually answers in prose and reports
+the run a success; codex generates until it hits its output ceiling and reports
+a failed turn.
 
 Either way the outcome is the same to a caller: `IsError` set, `Structured` nil,
-and `Text` carrying the agent's own account of why there is no answer. That is a
-verdict, not an outage — the run happened and the explanation is worth reading.
+and `Text` carrying whatever account there is — the agent's own on Claude Code,
+codex's on a turn it failed. That is an **unmet constraint**: a verdict, not an
+outage, because the run happened and the explanation is worth reading.
+
+A sandbox refusal on a schema-constrained run lands here too. Refusing is a
+successful verdict about authority, but it still leaves the caller without the
+shape it asked for, so the constraint is what the outcome reports.
+
+`Result` carries a `json.RawMessage` and so is not comparable with `==`; compare
+with `reflect.DeepEqual`.
 
 ## Credential modes
 
@@ -172,8 +188,9 @@ Three layers, and only the third costs money:
 
 Early. The API is not stable. `claudecode` is complete. `codex` drives
 single-turn runs: `StreamCommand`, the decoder, `PermissionArgs`, `SchemaArgs`,
-`AuthEnv` and `DenyEnv` are written against captured output from the real CLI. It declares no
-`TurnLimiter` (codex has no turn bound), no `AgentDefiner` and no `Installer`,
+`AuthEnv` and `DenyEnv` are written against captured output from the real CLI.
+It declares no `TurnLimiter` (codex has no turn bound), no `AgentDefiner` and no
+`Installer`,
 and its `PermissionArgs` refuses `AllowedTools` outright — codex has no per-tool
 allowlist, and accepting one could only mean discarding it.
 

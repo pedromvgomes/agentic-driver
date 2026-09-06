@@ -16,7 +16,7 @@ The two CLIs constrain by different mechanisms, and the mechanisms fail differen
 Codex constrains the decoder itself: `--output-schema` yields a final `agent_message` that
 cannot be invalid JSON, though it can be schema-valid nonsense — padding a `minItems: 7`
 array with `":["` — and a schema nothing satisfies makes the run generate until it hits its
-output ceiling, reconnect ten times, and report `turn.failed`. Claude Code offers the model
+output ceiling, reconnect until it gives up, and report `turn.failed`. Claude Code offers the model
 a tool, `StructuredOutput`, validates each call against the schema, feeds
 `Output does not match required schema` back and lets it retry. When it gives up it answers
 in prose on **exit 0**, with `is_error: false`, `subtype: "success"`, and no
@@ -24,9 +24,9 @@ in prose on **exit 0**, with `is_error: false`, `subtype: "success"`, and no
 
 That last case is the one this record exists for. Taken at the CLI's word it is a clean
 success whose `Text` happens not to be JSON, and every downstream caller inherits the
-problem. So a run given a schema that produces no payload is reported as a bad verdict:
-populated `Result`, nil error, `IsError` set, `Structured` nil, and `Text` carrying the
-agent's own account of why it could not answer in the required shape. It is the only
+problem. So a run given a schema that produces no payload is reported as an **unmet constraint**:
+populated `Result`, nil error, `IsError` set, `Structured` nil, and `Text` carrying
+whatever account there is of why it could not answer in the required shape. It is the only
 verdict the library reaches on its own, and it is deliberately not an outage — the run
 happened, it cost money, and the agent's explanation is worth reading.
 
@@ -37,10 +37,18 @@ authoritative signal rather than a shared guess: claudecode checks whether the e
 carries `structured_output`, codex whether the final agent message is a document.
 
 The schema reaches each CLI differently — claude takes it inline, codex takes a path — so
-the codex provider writes the file itself, named for the SHA-256 of its contents under one
-directory in `TMPDIR`. The digest is what keeps a file from being a per-run side effect:
-the same schema always renders the same argv, two runs sharing a schema share the file, and
-there is nothing per-run left behind for anyone to reclaim.
+the codex provider writes the file itself, named for the SHA-256 of its contents. The digest
+is what keeps a file from being a per-run side effect: the same schema always renders the
+same argv, two runs sharing a schema share the file, and there is nothing per-run left
+behind for anyone to reclaim.
+
+The digest names the file; it does not vouch for it. `TMPDIR` is shared between accounts on
+a Unix host, and creating a directory succeeds on one that already exists whoever owns it —
+so the directory is per-user, and refused unless it is a directory this user owns that no
+other user can write. Within it, a path that already exists is read and compared against the
+schema rather than trusted for having the right name, because a name is something anything
+able to write the directory could have chosen, and a run constrained to a schema nobody
+asked for still answers, in valid JSON, with nothing to mark it wrong.
 
 ## Considered options
 
@@ -75,8 +83,23 @@ is.
 
 ## Consequences
 
-`Result` grows `Structured`, and stops being comparable with `==`; tests that compared two
-`Result` values now use `reflect.DeepEqual`.
+`Result` grows `Structured` and stops being comparable with `==`, so equality is
+`reflect.DeepEqual`. Callers comparing two results, using one as a map key, or embedding one
+in a comparable struct are affected.
+
+Schema files are never removed. They accumulate one per distinct schema per user, in a
+directory the operating system reclaims with the rest of `TMPDIR`, and that is the price of
+an argv that is a function of the request rather than of the moment it was built.
+
+`Request.Schema` is read as set-or-not, not as empty-or-not. An empty schema is a question
+about shape nobody managed to phrase, and treating it as no question would let it past the
+capability gate, the provider and both decoders to arrive as a clean unconstrained success.
+A schema must also be a JSON object, which rules out the literal `null` that marshalling a
+nil value produces.
+
+A sandbox refusal on a schema-constrained run is an unmet constraint, not a refusal.
+Refusing is a successful verdict about authority; the schema asks about shape, and the run
+failed that question. `CONTEXT.md` records the precedence.
 
 The two CLIs still disagree about what an unusable schema IS, and the library does not
 hide it. A document that is well-formed JSON but not a usable schema is an outage on

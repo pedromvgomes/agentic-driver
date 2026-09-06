@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,17 +31,220 @@ func schemaPath(t *testing.T, args []string) string {
 // process does — a path pointing at nothing is refused by the CLI before the
 // model runs.
 func TestSchemaArgsWritesTheSchemaItNames(t *testing.T) {
+	// The file is named for its contents and outlives the process that wrote
+	// it, so a run on a machine that has seen this schema before would find it
+	// already there and assert on someone else's work. Removing it first is
+	// what makes this a test of the write.
+	path := removeSchemaFile(t, schema)
+
 	args, err := New().SchemaArgs(schema)
 	if err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
+	if got := schemaPath(t, args); got != path {
+		t.Fatalf("argv names %s, want %s", got, path)
+	}
 
-	written, err := os.ReadFile(schemaPath(t, args))
+	written, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the schema the argv names: %v", err)
 	}
 	if string(written) != string(schema) {
 		t.Errorf("file holds %s, want %s", written, schema)
+	}
+}
+
+// removeSchemaFile clears the file a schema would be published to and returns
+// its path, so a test starts from a machine that has never seen this schema.
+func removeSchemaFile(t *testing.T, schema json.RawMessage) string {
+	t.Helper()
+
+	dir, err := (&Provider{}).schemaDir()
+	if err != nil {
+		t.Fatalf("schemaDir: %v", err)
+	}
+	sum := sha256.Sum256(schema)
+	path := filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clearing %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
+}
+
+// The digest names the file; it does not vouch for it. Anything able to write
+// the directory could have put a different document at the name, and a run
+// constrained to a schema nobody asked for still answers in valid JSON with
+// nothing to mark it wrong — so the contents are read and compared, never
+// inferred from the path.
+func TestAPlantedSchemaFileIsReplaced(t *testing.T) {
+	path := removeSchemaFile(t, schema)
+
+	planted := []byte(`{"type":"object","properties":{"attacker":{"type":"string"}}}`)
+	if err := os.WriteFile(path, planted, 0o600); err != nil {
+		t.Fatalf("planting a file: %v", err)
+	}
+
+	if _, err := New().SchemaArgs(schema); err != nil {
+		t.Fatalf("SchemaArgs: %v", err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the schema: %v", err)
+	}
+	if string(written) != string(schema) {
+		t.Errorf("file holds %s, want the requested schema %s", written, schema)
+	}
+}
+
+// A symlink at the schema's name would send codex to read a file the driver
+// never meant it to, and an existence check that follows links cannot see one.
+func TestASymlinkAtTheSchemaNameIsReplaced(t *testing.T) {
+	path := removeSchemaFile(t, schema)
+
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.json")
+	if err := os.WriteFile(elsewhere, []byte(`{"type":"object"}`), 0o600); err != nil {
+		t.Fatalf("preparing the link target: %v", err)
+	}
+	if err := os.Symlink(elsewhere, path); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+
+	if _, err := New().SchemaArgs(schema); err != nil {
+		t.Fatalf("SchemaArgs: %v", err)
+	}
+
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("inspecting the published path: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("the schema path is still a symlink, so codex would read whatever it points at")
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the schema: %v", err)
+	}
+	if string(written) != string(schema) {
+		t.Errorf("file holds %s, want the requested schema", written)
+	}
+	// The link target is left alone: renaming over a symlink replaces the link,
+	// not the file at the end of it.
+	target, err := os.ReadFile(elsewhere)
+	if err != nil || string(target) != `{"type":"object"}` {
+		t.Errorf("the link target was written through: %s (%v)", target, err)
+	}
+}
+
+// A directory shared with another account cannot be trusted to hold only what
+// this process put there, and MkdirAll succeeds on one whoever owns it.
+func TestASchemaDirectoryOpenToOtherUsersIsRefused(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+
+	p := &Provider{}
+	dir, err := p.schemaDir()
+	if err != nil {
+		t.Fatalf("schemaDir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("widening the directory: %v", err)
+	}
+
+	if _, err := p.schemaDir(); err == nil {
+		t.Error("a world-writable schema directory was accepted")
+	}
+}
+
+// A directory that cannot be made is an outage: nothing was said about the
+// request, and no process ran.
+func TestASchemaThatCannotBeWrittenIsAnOutage(t *testing.T) {
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("in the way"), 0o600); err != nil {
+		t.Fatalf("preparing the obstruction: %v", err)
+	}
+	t.Setenv("TMPDIR", blocked)
+
+	_, err := (&Provider{}).SchemaArgs(schema)
+	if !errors.Is(err, agentic.ErrProviderUnavailable) {
+		t.Errorf("error = %v, want ErrProviderUnavailable", err)
+	}
+	if errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Error("a filesystem failure was reported as a bad request")
+	}
+}
+
+// Codex constrains the decoder, so a completed turn normally cannot answer with
+// anything but conforming JSON. The backstop is for the turn that ends some
+// other way — one truncated mid-document leaves text that is not a document,
+// and the CLI reports that turn a success.
+func TestATruncatedAnswerIsAnUnmetConstraintOnASuccessfulTurn(t *testing.T) {
+	decoder := New().NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"77777777-7777-4777-8777-777777777777"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\"answer\":\"trunc"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	} {
+		if _, err := decoder.Decode([]byte(line)); err != nil {
+			t.Fatalf("decode %q: %v", line, err)
+		}
+	}
+
+	result, ok := decoder.Result()
+	if !ok {
+		t.Fatal("the run reported no result")
+	}
+	if !result.IsError {
+		t.Error("IsError = false on a turn whose answer is not a document")
+	}
+	if result.Structured != nil {
+		t.Errorf("Structured = %s, want nil", result.Structured)
+	}
+}
+
+// A JSON null satisfies every syntactic test and answers nothing: unmarshalling
+// it leaves the caller's value zeroed with no sign anything went wrong.
+func TestANullAnswerIsNotAPayload(t *testing.T) {
+	decoder := New().NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"77777777-7777-4777-8777-777777777777"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"null"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	} {
+		if _, err := decoder.Decode([]byte(line)); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+
+	result, _ := decoder.Result()
+	if !result.IsError || result.Structured != nil {
+		t.Errorf("IsError = %v, Structured = %s; want a null answer treated as no answer",
+			result.IsError, result.Structured)
+	}
+}
+
+// A Result whose IsError is set beside an empty Text says a run failed without
+// saying anything about it. A turn that completes carrying no agent message at
+// all has no explanation to borrow, so the decoder supplies one.
+func TestAnUnmetConstraintAlwaysSaysSomething(t *testing.T) {
+	decoder := New().NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"77777777-7777-4777-8777-777777777777"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`,
+	} {
+		if _, err := decoder.Decode([]byte(line)); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+	}
+
+	result, _ := decoder.Result()
+	if !result.IsError {
+		t.Fatal("IsError = false on a run that produced no answer at all")
+	}
+	if result.Text == "" {
+		t.Error("Text is empty, so the verdict reports a failure it cannot explain")
 	}
 }
 
@@ -241,5 +445,10 @@ func TestASchemaFileCodexCannotReadLeavesNoResultToReport(t *testing.T) {
 	}
 	if !strings.Contains(string(stderr), "not valid JSON") {
 		t.Errorf("stderr = %q, want the CLI's explanation of the schema file", stderr)
+	}
+	// The message names the file, which is what makes it diagnosable: the
+	// driver's own error says only that a run produced nothing.
+	if !strings.Contains(string(stderr), schemaDirName) || !strings.Contains(string(stderr), ".json") {
+		t.Errorf("stderr = %q, want it to name the schema file the driver passed", stderr)
 	}
 }

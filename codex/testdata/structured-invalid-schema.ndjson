@@ -1,4 +1,4 @@
-{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}
+{"type":"thread.started","thread_id":"99999999-9999-4999-8999-999999999999"}
 {"type":"turn.started"}
 {"type":"error","message":"{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_json_schema\",\n    \"message\": \"Invalid schema for response_format 'codex_output_schema': 42 is not of type 'object'.\",\n    \"param\": \"text.format.schema\"\n  },\n  \"status\": 400\n}"}
 {"type":"turn.failed","error":{"message":"{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"code\": \"invalid_json_schema\",\n    \"message\": \"Invalid schema for response_format 'codex_output_schema': 42 is not of type 'object'.\",\n    \"param\": \"text.format.schema\"\n  },\n  \"status\": 400\n}"}}
