@@ -16,15 +16,20 @@ import (
 // a rejected token returns subtype "success" ALONGSIDE is_error true and
 // api_error_status 401.
 type envelope struct {
-	Type           string  `json:"type"`
-	IsError        bool    `json:"is_error"`
-	APIErrorStatus int     `json:"api_error_status"`
-	Subtype        string  `json:"subtype"`
-	Result         string  `json:"result"`
-	SessionID      string  `json:"session_id"`
-	NumTurns       int     `json:"num_turns"`
-	TotalCostUSD   float64 `json:"total_cost_usd"`
-	Usage          struct {
+	Type           string `json:"type"`
+	IsError        bool   `json:"is_error"`
+	APIErrorStatus int    `json:"api_error_status"`
+	Subtype        string `json:"subtype"`
+	Result         string `json:"result"`
+	SessionID      string `json:"session_id"`
+	// StructuredOutput is the answer to a run that carried --json-schema. It is
+	// ABSENT, not null and not empty, on a run that gave up on the shape — and
+	// that run reports is_error false with subtype "success", so its presence
+	// is the only thing that says the constraint held.
+	StructuredOutput json.RawMessage `json:"structured_output"`
+	NumTurns         int             `json:"num_turns"`
+	TotalCostUSD     float64         `json:"total_cost_usd"`
+	Usage            struct {
 		InputTokens              int `json:"input_tokens"`
 		OutputTokens             int `json:"output_tokens"`
 		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
@@ -101,11 +106,12 @@ func (p *dialect) Parse(stdout, stderr []byte, code int) (agentic.Result, error)
 	}
 
 	return agentic.Result{
-		Text:      p.text(env),
-		SessionID: env.SessionID,
-		Model:     env.model(),
-		Turns:     env.NumTurns,
-		IsError:   env.IsError,
+		Text:       p.text(env),
+		Structured: env.StructuredOutput,
+		SessionID:  env.SessionID,
+		Model:      env.model(),
+		Turns:      env.NumTurns,
+		IsError:    env.IsError,
 		Usage: agentic.Usage{
 			InputTokens:         env.Usage.InputTokens,
 			OutputTokens:        env.Usage.OutputTokens,
@@ -167,7 +173,9 @@ type streamEvent struct {
 }
 
 // NewDecoder returns a decoder for one run.
-func (p *dialect) NewDecoder() agentic.Decoder { return &decoder{dialect: p} }
+func (p *dialect) NewDecoder(req agentic.Request) agentic.Decoder {
+	return &decoder{dialect: p, schema: len(req.Schema) > 0}
+}
 
 // decoder folds one run of `--output-format stream-json --verbose`.
 //
@@ -179,6 +187,9 @@ type decoder struct {
 	*dialect
 	result   agentic.Result
 	complete bool
+	// schema records that the run was required to answer in a shape. Parse
+	// reports what the envelope said; only the run knows what it was asked for.
+	schema bool
 }
 
 // Decode decodes one line of the stream.
@@ -211,6 +222,14 @@ func (d *decoder) Decode(line []byte) (agentic.Event, error) {
 		result, err := d.Parse(line, nil, 0)
 		if err != nil {
 			return agentic.Event{}, err
+		}
+		if d.schema && len(result.Structured) == 0 {
+			// The CLI calls this a success: exit 0, is_error false, subtype
+			// "success", and a result field holding the agent's prose account
+			// of why it could not satisfy the schema. It is not a success to a
+			// caller that asked for JSON, and nothing else in the envelope
+			// marks it, so the verdict is corrected here.
+			result.IsError = true
 		}
 		d.result, d.complete = result, true
 		// Recorded, not yielded. The driver builds the terminal event from

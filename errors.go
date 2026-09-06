@@ -43,6 +43,12 @@ var (
 	// was applied.
 	ErrTurnLimitUnsupported = errors.New("provider does not support bounding the agent loop")
 
+	// ErrSchemaUnsupported means Request.Schema was set on a provider that does
+	// not implement SchemaConstrainer. Dropping the schema leaves a run that
+	// answers in prose while the caller waits to unmarshal it, and the reply
+	// says nothing about the constraint having been skipped.
+	ErrSchemaUnsupported = errors.New("provider does not support constraining output to a schema")
+
 	// ErrInstallUnsupported means the provider vendors no binary, so there is
 	// nothing for Install to fetch.
 	ErrInstallUnsupported = errors.New("provider installs nothing")

@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I\u2019ll list this directory and count its `.json` files."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/opt/homebrew/bin/zsh -lc ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/opt/homebrew/bin/zsh -lc ls","aggregated_output":"README.md\nbroken.json\nhard.json\nharder.json\nnotaschema.json\nout\nsimple.json\nviolate.json\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/opt/homebrew/bin/zsh -lc \"find . -maxdepth 1 -type f -name '*.json' | wc -l\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/opt/homebrew/bin/zsh -lc \"find . -maxdepth 1 -type f -name '*.json' | wc -l\"","aggregated_output":"       6\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"{\"answer\":\"There are 6 .json files in this directory.\",\"confidence\":6}"}}
+{"type":"turn.completed","usage":{"input_tokens":32146,"cached_input_tokens":15744,"cache_write_input_tokens":0,"output_tokens":109,"reasoning_output_tokens":0}}

@@ -30,7 +30,9 @@ type event struct {
 }
 
 // NewDecoder returns a decoder for one run.
-func (p *Provider) NewDecoder() agentic.Decoder { return &decoder{} }
+func (p *Provider) NewDecoder(req agentic.Request) agentic.Decoder {
+	return &decoder{schema: len(req.Schema) > 0}
+}
 
 // decoder folds one run of `codex exec --json`.
 //
@@ -46,6 +48,10 @@ type decoder struct {
 	turns     int
 	isError   bool
 	complete  bool
+	// schema records that the run was required to answer in a shape, which is
+	// the only way the fold can tell an answer from an explanation of why there
+	// is none.
+	schema bool
 }
 
 // Decode consumes one line of the stream.
@@ -156,17 +162,39 @@ func (d *decoder) Result() (agentic.Result, bool) {
 	if !d.complete {
 		return agentic.Result{}, false
 	}
+
+	structured, unmet := d.constrained()
 	return agentic.Result{
-		Text:      d.answer(),
-		SessionID: d.sessionID,
+		Text:       d.answer(),
+		Structured: structured,
+		SessionID:  d.sessionID,
 		// Model is left zero. The stream never names the model that answered,
 		// and echoing back the one that was REQUESTED would describe a choice
 		// the CLI never confirmed making.
 		Model:   "",
 		Usage:   d.usage,
 		Turns:   d.turns,
-		IsError: d.isError,
+		IsError: d.isError || unmet,
 	}, true
+}
+
+// constrained reports the schema-conforming answer, and whether a run that
+// required one did not produce it.
+//
+// Codex constrains the decoder itself, so the final agent message of a
+// successful turn cannot be anything but conforming JSON — which makes this a
+// backstop rather than a routine path. It earns its place on the turns that end
+// some other way: a turn that failed carries no agent message at all, and one
+// truncated mid-document leaves text that is not a document, and neither is an
+// answer to a caller waiting to unmarshal one.
+func (d *decoder) constrained() (json.RawMessage, bool) {
+	if !d.schema {
+		return nil, false
+	}
+	if d.isError || !json.Valid([]byte(d.text)) {
+		return nil, true
+	}
+	return json.RawMessage(d.text), false
 }
 
 // answer is the agent's reply, or the explanation for why there is none.

@@ -15,7 +15,12 @@
 package codex
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -75,6 +80,13 @@ func (p *Provider) StreamCommand(req agentic.Request) (agentic.Invocation, error
 		return agentic.Invocation{}, err
 	}
 	args = append(args, permArgs...)
+	if len(req.Schema) > 0 {
+		schemaArgs, err := p.SchemaArgs(req.Schema)
+		if err != nil {
+			return agentic.Invocation{}, err
+		}
+		args = append(args, schemaArgs...)
+	}
 	// The prompt is positional and last, so nothing it contains can be read as
 	// a flag.
 	args = append(args, req.Prompt)
@@ -120,6 +132,70 @@ func (p *Provider) PermissionArgs(mode string, allowedTools []string) ([]string,
 	return []string{"-s", mode}, nil
 }
 
+// schemaDirName is the directory schema files are written under, inside the
+// system temporary directory.
+const schemaDirName = "agentic-codex-schema"
+
+// SchemaArgs binds the final answer to a JSON Schema.
+//
+// Codex takes a PATH rather than the document, so the schema has to exist as a
+// file before the process starts. The file is named for the SHA-256 of its own
+// contents, which is what keeps that from being a per-run side effect: the same
+// schema always renders the same argv, so a logged or cached invocation stays
+// comparable and Run and Stream cannot issue different commands for one
+// request. Two runs sharing a schema share the file, and there is nothing
+// per-run left behind to reclaim.
+//
+// The write is create-exclusive into a temporary name and then renamed, so a
+// concurrent run either finds the finished file or writes its own and replaces
+// it with byte-identical content. A reader never sees a half-written schema,
+// which codex would reject as malformed JSON before the model ever ran.
+func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
+	sum := sha256.Sum256(schema)
+	dir := filepath.Join(os.TempDir(), schemaDirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("%w: codex: making a directory for the schema: %w", agentic.ErrProviderUnavailable, err)
+	}
+
+	// The name carries the whole digest: a truncated one makes two different
+	// schemas collide onto one file, and the run that lost would be constrained
+	// to a shape nobody asked it for.
+	path := filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
+	if err := writeOnce(path, schema); err != nil {
+		return nil, fmt.Errorf("%w: codex: writing the schema: %w", agentic.ErrProviderUnavailable, err)
+	}
+	return []string{"--output-schema", path}, nil
+}
+
+// writeOnce publishes content at path, atomically, and is a no-op when a file
+// is already there.
+//
+// An existing file is content, not staleness: the name IS the digest of what it
+// must contain, so anything already at that path is the same bytes.
+func writeOnce(path string, content []byte) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".schema-*")
+	if err != nil {
+		return err
+	}
+	// Removing the temporary name is safe after a successful rename too: it no
+	// longer refers to the published file. Without it, a failure between here
+	// and the rename leaves a partial file nothing will ever clean up.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 // AuthEnv carries an OpenAI key.
 //
 // A different variable from claudecode's, which is the point of the vocabulary
@@ -159,7 +235,8 @@ func (p *Provider) DenyEnv() []string {
 // is no signed manifest to pin against, so claiming a verified build would be a
 // claim it cannot keep.
 var (
-	_ agentic.Provider  = (*Provider)(nil)
-	_ agentic.Isolator  = (*Provider)(nil)
-	_ agentic.Permitter = (*Provider)(nil)
+	_ agentic.Provider          = (*Provider)(nil)
+	_ agentic.Isolator          = (*Provider)(nil)
+	_ agentic.Permitter         = (*Provider)(nil)
+	_ agentic.SchemaConstrainer = (*Provider)(nil)
 )

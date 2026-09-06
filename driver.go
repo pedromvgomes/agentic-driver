@@ -2,6 +2,7 @@ package agentic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -309,6 +310,25 @@ func (d *Driver) prepare(req Request) (Request, error) {
 	if req.MaxTurns > 0 {
 		if _, ok := d.provider.(TurnLimiter); !ok {
 			return req, fmt.Errorf("%w: %s", ErrTurnLimitUnsupported, d.descriptor.ID)
+		}
+	}
+
+	// A dropped schema fails the way a dropped roster does: the run answers
+	// well and in the wrong shape, and the caller finds out where it tries to
+	// unmarshal prose.
+	if len(req.Schema) > 0 {
+		if _, ok := d.provider.(SchemaConstrainer); !ok {
+			return req, fmt.Errorf("%w: %s", ErrSchemaUnsupported, d.descriptor.ID)
+		}
+		// Checked once, here, so the two CLIs answer the same way to the same
+		// typo. Left to them it is a usage error on one and a rejected turn on
+		// the other, and only one of those is an outage.
+		//
+		// It stops at well-formedness. Whether a well-formed document is a
+		// USABLE schema is the vendor's judgement, and a second opinion here
+		// could only disagree with the CLI that has to honour it.
+		if !json.Valid(req.Schema) {
+			return req, fmt.Errorf("%w: the schema is not valid JSON", ErrInvalidRequest)
 		}
 	}
 

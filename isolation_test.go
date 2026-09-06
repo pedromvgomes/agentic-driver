@@ -89,7 +89,7 @@ func (passthrough) StreamCommand(req agentic.Request) (agentic.Invocation, error
 	return agentic.Invocation{Args: []string{"--prompt", req.Prompt}}, nil
 }
 
-func (passthrough) NewDecoder() agentic.Decoder { return &passthroughDecoder{} }
+func (passthrough) NewDecoder(agentic.Request) agentic.Decoder { return &passthroughDecoder{} }
 
 // passthroughDecoder treats every line as the answer, which is enough for tests
 // about the environment a child is given rather than what it said.

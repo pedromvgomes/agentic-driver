@@ -15,6 +15,7 @@ package agentic
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -34,8 +35,15 @@ type Provider interface {
 	// the same Request differently.
 	StreamCommand(Request) (Invocation, error)
 
-	// NewDecoder returns a decoder for exactly one run.
-	NewDecoder() Decoder
+	// NewDecoder returns a decoder for exactly one run, and is handed the
+	// request that run is answering.
+	//
+	// The request is there because some outcomes are only legible against what
+	// was asked for. A run given a Schema that produces no structured payload
+	// has not answered, however cheerfully the CLI reports it — and the decoder
+	// is the only thing positioned to read the provider's own signal for that,
+	// rather than guessing from whether the text happens to parse.
+	NewDecoder(Request) Decoder
 }
 
 // Decoder consumes the lines of one run, in order, and folds them into a
@@ -178,6 +186,29 @@ type TurnLimiter interface {
 	TurnLimitArgs(maxTurns int) ([]string, error)
 }
 
+// SchemaConstrainer is optional: the provider can bind the run's final answer
+// to a JSON Schema.
+//
+// A capability rather than a Request field every provider honours, for the
+// reason every gate here exists: a dropped schema fails silently and in the
+// direction that looks like success. The run answers the prompt in prose,
+// competently, and nothing in the reply says the shape was never applied — so
+// the caller discovers it by feeding that prose to a JSON decoder somewhere
+// else entirely.
+type SchemaConstrainer interface {
+	// SchemaArgs returns the arguments that bind the answer to schema.
+	//
+	// The schema is already valid JSON: the driver checks that before any
+	// provider sees it. What remains is dialect, and it differs — one CLI takes
+	// the document inline, another takes a path to it — so a provider that
+	// needs the schema on disk puts it there itself.
+	//
+	// It returns ErrInvalidRequest for a schema this CLI cannot express, and
+	// ErrProviderUnavailable when the arguments could not be built at all: a
+	// schema file that cannot be written is not a statement about the request.
+	SchemaArgs(schema json.RawMessage) ([]string, error)
+}
+
 // Installer is optional: only for providers that vendor a binary.
 //
 // Implementing it also settles where the binary comes from. A vendored CLI is
@@ -254,6 +285,14 @@ type Request struct {
 	WorkDir string
 	// Timeout bounds this invocation, overriding the driver's default.
 	Timeout time.Duration
+	// Schema binds the run's final answer to a JSON Schema, or is empty for an
+	// unconstrained answer. It requires a SchemaConstrainer.
+	//
+	// A run carrying one answers in Result.Structured. A run that was given a
+	// schema and produced no payload comes back with IsError set, because a
+	// caller that asked for JSON and received prose has not been answered —
+	// even where the CLI itself called the run a success.
+	Schema json.RawMessage
 }
 
 // Invocation is what a provider says to run: the arguments after the binary,
@@ -297,9 +336,22 @@ type Result struct {
 	// however much work it did. Reading the two as the same quantity makes an
 	// exhaustive codex run look cheaper than a trivial Claude Code one.
 	Turns int
-	// IsError reports that the CLI itself declared the turn a failure. It is a
-	// verdict from the provider, not an error from the library: the Result is
-	// still populated, and Text carries the explanation.
+	// Structured is the schema-conforming answer to a run that carried a
+	// Request.Schema, exactly as the provider reported it. It is nil for a run
+	// that asked for no schema, and nil alongside IsError for one that asked
+	// and did not get it.
+	//
+	// Separate from Text because the two are not the same statement. Text is
+	// what the run said; Structured is what it said in the shape it was
+	// required to say it in, and the run where those diverge — an agent
+	// explaining in prose that it could not satisfy the schema — is the one
+	// worth being able to tell apart.
+	Structured json.RawMessage
+	// IsError reports that the turn failed. Usually that is the CLI's own
+	// declaration, and the Result is still populated with Text carrying the
+	// explanation. It is also set for a run that was given a Schema and
+	// produced no Structured payload, which is the one verdict the library
+	// reaches on its own.
 	IsError bool
 }
 
