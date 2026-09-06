@@ -66,7 +66,7 @@ func TestAConfigDirectoryRedirectsTheCLIsOwnState(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	inv, err := p.Command(agentic.Request{Prompt: "hi"})
+	inv, err := p.StreamCommand(agentic.Request{Prompt: "hi"})
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}
@@ -85,7 +85,6 @@ func TestEveryInvocationDisablesTheAutoUpdater(t *testing.T) {
 	p := testProvider(t)
 
 	for name, build := range map[string]func(agentic.Request) (agentic.Invocation, error){
-		"Command":       p.Command,
 		"StreamCommand": p.StreamCommand,
 	} {
 		inv, err := build(agentic.Request{Prompt: "hi"})
@@ -299,5 +298,25 @@ func TestInstalledAndRunnableAgreeOnWhatIsExecutable(t *testing.T) {
 				t.Errorf("at mode %v: Installed says %v, Ready says %v", mode, isInstalled, isRunnable)
 			}
 		})
+	}
+}
+
+// Claude Code counts a turn as one iteration of the agent loop, so the bound is
+// real vocabulary here rather than a field to refuse.
+func TestTheTurnLimitBecomesTheMaxTurnsFlag(t *testing.T) {
+	args, err := testProvider(t).TurnLimitArgs(3)
+	if err != nil {
+		t.Fatalf("TurnLimitArgs: %v", err)
+	}
+	if !slices.Equal(args, []string{"--max-turns", "3"}) {
+		t.Errorf("TurnLimitArgs(3) = %q, want the bound spelled as a flag", args)
+	}
+}
+
+// A bound below one leaves the loop no iteration to run in, which the CLI would
+// take as an instruction to do nothing rather than as the mistake it is.
+func TestATurnLimitBelowOneIsRefused(t *testing.T) {
+	if _, err := testProvider(t).TurnLimitArgs(0); !errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Errorf("error = %v, want ErrInvalidRequest", err)
 	}
 }

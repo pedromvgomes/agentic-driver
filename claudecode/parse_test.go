@@ -177,7 +177,7 @@ func TestParseIsIndifferentToTheExitCode(t *testing.T) {
 func TestCommandRefusesAnEmptyPrompt(t *testing.T) {
 	p := testProvider(t)
 
-	_, err := p.Command(agentic.Request{})
+	_, err := p.StreamCommand(agentic.Request{})
 	if !errors.Is(err, agentic.ErrInvalidRequest) {
 		t.Errorf("error = %v, want ErrInvalidRequest", err)
 	}
@@ -190,7 +190,6 @@ func TestEveryInvocationRefusesToLoadSettings(t *testing.T) {
 	p := testProvider(t)
 
 	for name, build := range map[string]func(agentic.Request) (agentic.Invocation, error){
-		"Command":       p.Command,
 		"StreamCommand": p.StreamCommand,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -208,7 +207,7 @@ func TestEveryInvocationRefusesToLoadSettings(t *testing.T) {
 func TestOptionalRequestFieldsAreFlagsOnlyWhenSet(t *testing.T) {
 	p := testProvider(t)
 
-	bare, err := p.Command(agentic.Request{Prompt: "hi"})
+	bare, err := p.StreamCommand(agentic.Request{Prompt: "hi"})
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}
@@ -218,7 +217,7 @@ func TestOptionalRequestFieldsAreFlagsOnlyWhenSet(t *testing.T) {
 		}
 	}
 
-	full, err := p.Command(agentic.Request{Prompt: "hi", Model: "claude-opus-5", MaxTurns: 3, SessionID: "abc"})
+	full, err := p.StreamCommand(agentic.Request{Prompt: "hi", Model: "claude-opus-5", MaxTurns: 3, SessionID: "abc"})
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}
@@ -253,7 +252,7 @@ func TestTheTokenIsCarriedByEnvironmentNotArgv(t *testing.T) {
 		t.Errorf("AuthEnv = %v, want the token under CLAUDE_CODE_OAUTH_TOKEN", env)
 	}
 
-	inv, err := p.Command(agentic.Request{Prompt: "hi"})
+	inv, err := p.StreamCommand(agentic.Request{Prompt: "hi"})
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}

@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"66666666-6666-4666-8666-666666666666"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll create the requested file, then confirm completion."}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I couldn’t create `out.txt`: this workspace is read-only."}}
+{"type":"turn.completed","usage":{"input_tokens":28388,"cached_input_tokens":26112,"cache_write_input_tokens":0,"output_tokens":126,"reasoning_output_tokens":48}}

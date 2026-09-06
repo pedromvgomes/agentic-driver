@@ -7,9 +7,8 @@ The library owns the **process**; a provider owns the **dialect**.
 - **Process** — argv assembly, context and timeout handling, exit-code
   interpretation, stderr redaction, environment construction. Written once, in
   this package, and no provider touches it.
-- **Dialect** — flag spelling, result-envelope schema, the environment
-  variables that can hijack a given CLI, resume semantics. Declared per
-  provider.
+- **Dialect** — flag spelling, event schema, the environment variables that can
+  hijack a given CLI, resume semantics. Declared per provider.
 
 Providers live in their own subpackages (`claudecode`, `codex`) and declare
 their capabilities by which interfaces they implement, discovered by type
@@ -138,8 +137,12 @@ Three layers, and only the third costs money:
 
 ## Status
 
-Early. The API is not stable. `claudecode` is complete; `codex` implements
-`Command`, `AuthEnv` and `DenyEnv`, and its `Parse` awaits a captured envelope.
+Early. The API is not stable. `claudecode` is complete. `codex` drives
+single-turn runs: `StreamCommand`, the decoder, `PermissionArgs`, `AuthEnv` and
+`DenyEnv` are written against captured output from the real CLI. It declares no
+`TurnLimiter` (codex has no turn bound), no `AgentDefiner` and no `Installer`,
+and its `PermissionArgs` refuses `AllowedTools` outright — codex has no per-tool
+allowlist, and accepting one could only mean discarding it.
 
 ## License
 

@@ -1,8 +1,8 @@
 package agentic_test
 
 import (
-	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -10,39 +10,6 @@ import (
 	agentic "github.com/pedromvgomes/agentic-driver"
 	"github.com/pedromvgomes/agentic-driver/agentictest"
 )
-
-// streaming is a stub whose events are one JSON object per line.
-type streaming struct {
-	stub
-}
-
-func (s *streaming) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
-	inv, err := s.stub.Command(req)
-	if err != nil {
-		return agentic.Invocation{}, err
-	}
-	inv.Args = append(inv.Args, "--stream")
-	return inv, nil
-}
-
-func (s *streaming) ParseEvent(line []byte) (agentic.Event, error) {
-	var event struct {
-		Kind string `json:"kind"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(line, &event); err != nil {
-		return agentic.Event{}, err
-	}
-
-	switch event.Kind {
-	case "text":
-		return agentic.Event{Kind: agentic.EventKindText, Text: event.Text}, nil
-	case "result":
-		return agentic.Event{Kind: agentic.EventKindResult, Result: agentic.Result{Text: event.Text}}, nil
-	default:
-		return agentic.Event{}, nil
-	}
-}
 
 func collect(t *testing.T, d *agentic.Driver, req agentic.Request) ([]agentic.Event, error) {
 	t.Helper()
@@ -70,7 +37,7 @@ const eventLines = `{"kind":"noise"}
 
 func TestStreamYieldsEveryModelledEvent(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: eventLines}).Build(t)
-	d := driver(t, &streaming{}, fake)
+	d := driver(t, &stub{}, fake)
 
 	events, err := collect(t, d, agentic.Request{Prompt: "hi"})
 	if err != nil {
@@ -91,7 +58,7 @@ func TestStreamYieldsEveryModelledEvent(t *testing.T) {
 // working, so an unmodelled line is skipped rather than yielded as an error.
 func TestAnUnmodelledLineDoesNotEndTheStream(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: eventLines}).Build(t)
-	d := driver(t, &streaming{}, fake)
+	d := driver(t, &stub{}, fake)
 
 	events, err := collect(t, d, agentic.Request{Prompt: "hi"})
 	if err != nil {
@@ -104,30 +71,34 @@ func TestAnUnmodelledLineDoesNotEndTheStream(t *testing.T) {
 	}
 }
 
-func TestStreamUsesTheStreamingDialect(t *testing.T) {
-	fake := (&agentictest.Fake{Stdout: eventLines}).Build(t)
-	d := driver(t, &streaming{}, fake)
+// Run and Stream are the same invocation. A provider with one argv builder per
+// mode would have two dialects to keep in step, and the day they drift is the
+// day the same Request is answered two different ways.
+func TestRunAndStreamIssueTheSameArgv(t *testing.T) {
+	req := agentic.Request{Prompt: "hi"}
 
-	if _, err := collect(t, d, agentic.Request{Prompt: "hi"}); err != nil {
+	streamed := (&agentictest.Fake{Stdout: eventLines}).Build(t)
+	if _, err := collect(t, driver(t, &stub{}, streamed), req); err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 
-	var sawStreamFlag bool
-	for _, arg := range fake.Recorded(t).Args {
-		if arg == "--stream" {
-			sawStreamFlag = true
-		}
+	ran := (&agentictest.Fake{Stdout: eventLines}).Build(t)
+	if _, err := driver(t, &stub{}, ran).Run(t.Context(), req); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if !sawStreamFlag {
-		t.Errorf("argv = %q, want StreamCommand's own flags", fake.Recorded(t).Args)
+
+	if !slices.Equal(streamed.Recorded(t).Args, ran.Recorded(t).Args) {
+		t.Errorf("Run and Stream built different commands:\nstream = %q\nrun    = %q",
+			streamed.Recorded(t).Args, ran.Recorded(t).Args)
 	}
 }
 
-// There is no envelope left to parse once a stream has ended, so a non-zero
-// exit is a failed run rather than a verdict something downstream could read.
-func TestAStreamThatExitsNonZeroIsAFailedRun(t *testing.T) {
+// A stream that stopped before its provider said how the turn ended made no
+// statement about the request, so there is no verdict to report and the exit
+// code is all that is left to go on.
+func TestAStreamThatEndsWithoutAResultIsAFailedRun(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: `{"kind":"text","text":"one"}` + "\n", Stderr: "boom", ExitCode: 3}).Build(t)
-	d := driver(t, &streaming{}, fake)
+	d := driver(t, &stub{}, fake)
 
 	events, err := collect(t, d, agentic.Request{Prompt: "hi"})
 	if !errors.Is(err, agentic.ErrProviderUnavailable) {
@@ -143,7 +114,7 @@ func TestAStreamThatExitsNonZeroIsAFailedRun(t *testing.T) {
 
 func TestAStreamTimeoutSaysHowLongItWaited(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: eventLines, SleepSeconds: 30}).Build(t)
-	d := driver(t, &streaming{}, fake, agentic.WithTimeout(300*time.Millisecond))
+	d := driver(t, &stub{}, fake, agentic.WithTimeout(300*time.Millisecond))
 
 	_, err := collect(t, d, agentic.Request{Prompt: "hi"})
 	if !errors.Is(err, agentic.ErrProviderUnavailable) {
@@ -163,7 +134,7 @@ func TestAStreamTimeoutSaysHowLongItWaited(t *testing.T) {
 // for the life of the caller.
 func TestAbandoningAStreamKillsTheChild(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: eventLines, LingerSeconds: 60, SpawnChild: true}).Build(t)
-	d := driver(t, &streaming{}, fake, agentic.WithTimeout(5*time.Minute))
+	d := driver(t, &stub{}, fake, agentic.WithTimeout(5*time.Minute))
 
 	seq, err := d.Stream(t.Context(), agentic.Request{Prompt: "hi"})
 	if err != nil {
@@ -196,5 +167,44 @@ func TestAbandoningAStreamKillsTheChild(t *testing.T) {
 	}
 	if alive(t, pid) {
 		t.Errorf("the process the CLI spawned (pid %d) outlived the abandoned stream", pid)
+	}
+}
+
+// The rule the fold depends on. A CLI reports a rejected credential or an
+// unsupported model by finishing its stream properly and THEN exiting non-zero.
+// Judging the exit code first turns every one of those verdicts into a spurious
+// outage, which is the distinction the library exists to keep.
+func TestATerminalResultOutranksANonZeroExit(t *testing.T) {
+	fake := (&agentictest.Fake{
+		Stdout:   `{"kind":"result","text":"your token was rejected"}` + "\n",
+		Stderr:   "401 unauthorized",
+		ExitCode: 1,
+	}).Build(t)
+
+	result, err := driver(t, &stub{}, fake).Run(t.Context(), agentic.Request{Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("a completed turn that exited non-zero was reported as an outage: %v", err)
+	}
+	if result.Text != "your token was rejected" {
+		t.Errorf("Text = %q, want the verdict the CLI reported", result.Text)
+	}
+}
+
+// Same rule, one step further: a CLI that flushes its last event and then hangs
+// holding stdout open has stalled in its teardown, not in the work. The answer
+// arrived and was paid for.
+func TestATerminalResultOutranksATimeout(t *testing.T) {
+	fake := (&agentictest.Fake{
+		Stdout:        `{"kind":"result","text":"done"}` + "\n",
+		LingerSeconds: 30,
+	}).Build(t)
+
+	d := driver(t, &stub{}, fake, agentic.WithTimeout(300*time.Millisecond))
+	result, err := d.Run(t.Context(), agentic.Request{Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("a flushed result was discarded because the child lingered: %v", err)
+	}
+	if result.Text != "done" {
+		t.Errorf("Text = %q, want the answer that arrived before the stall", result.Text)
 	}
 }

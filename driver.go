@@ -242,42 +242,33 @@ func (d *Driver) ResolveModel(name string) string {
 // Result with IsError set and a nil error: that is a verdict, and discarding it
 // as an outage is exactly the confusion this split exists to prevent.
 func (d *Driver) Run(ctx context.Context, req Request) (Result, error) {
-	req, inv, err := d.invocation(req)
+	events, err := d.Stream(ctx, req)
 	if err != nil {
 		return Result{}, err
 	}
 
-	stdout, stderr, code, err := d.exec(ctx, req, inv)
-
-	// A caller that went away is never told the run succeeded. Everything else
-	// about the run is a question of what came back; this is a question of
-	// whether anyone is still listening, and answering "fine" to a context the
-	// caller cancelled during shutdown invites acting on it.
-	if ctx.Err() != nil {
+	// The intermediate events are discarded rather than never produced: the
+	// same decoder folds them either way, so a caller that wants only the
+	// answer and a caller watching the work cannot be told different things
+	// about the same run.
+	var result Result
+	var complete bool
+	for event, err := range events {
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{}, fmt.Errorf("%w: %s was cancelled: %w",
-			ErrProviderUnavailable, d.descriptor.ID, ctx.Err())
+		if event.Kind == EventKindResult {
+			result, complete = event.Result, true
+		}
 	}
-
-	// Parsed BEFORE the exit status is judged. A CLI reports a rejected
-	// credential or a refused request in its JSON body and may still exit
-	// non-zero, so discarding the output on a failed exit turns a clear verdict
-	// into a spurious "provider down".
-	//
-	// A complete envelope outranks a TIMEOUT for the same reason: the answer
-	// arrived and was paid for, and a CLI that flushes its result and then
-	// hangs holding stdout open has stalled in its teardown, not in the work.
-	result, parseErr := d.provider.Parse(stdout, stderr, code)
-	if parseErr == nil {
-		return result, nil
+	if !complete {
+		// Unreachable while Stream keeps its contract of ending in either an
+		// error or a terminal event. It is here because the alternative to
+		// checking is returning a zero Result as though the run had succeeded
+		// silently.
+		return Result{}, fmt.Errorf("%w: %s ended without a result", ErrProviderUnavailable, d.descriptor.ID)
 	}
-	if err != nil {
-		return Result{}, err
-	}
-	return Result{}, fmt.Errorf("%w: %s: %w%s",
-		ErrProviderUnavailable, d.descriptor.ID, parseErr, d.suffix(stderr))
+	return result, nil
 }
 
 // prepare settles the request against the driver's own configuration and
@@ -312,6 +303,15 @@ func (d *Driver) prepare(req Request) (Request, error) {
 		}
 	}
 
+	// Same direction of failure, in cost rather than authority: a CLI with no
+	// bound runs the loop as long as it likes while the caller believes it
+	// capped one.
+	if req.MaxTurns > 0 {
+		if _, ok := d.provider.(TurnLimiter); !ok {
+			return req, fmt.Errorf("%w: %s", ErrTurnLimitUnsupported, d.descriptor.ID)
+		}
+	}
+
 	// The model is settled before the provider sees the request, so Command is
 	// handed a name the CLI accepts rather than each provider having to
 	// remember to resolve one.
@@ -330,82 +330,11 @@ func (d *Driver) invocation(req Request) (Request, Invocation, error) {
 		return req, Invocation{}, err
 	}
 
-	inv, err := d.provider.Command(req)
+	inv, err := d.provider.StreamCommand(req)
 	if err != nil {
 		return req, Invocation{}, err
 	}
 	return req, inv, nil
-}
-
-// exec runs the child and returns its output and exit code.
-//
-// The error it returns is about the RUN — the process could not be started,
-// the caller went away, the deadline passed. An ordinary non-zero exit is not
-// one of those: it comes back as code, with stdout intact, because the provider
-// is the only thing that knows what that code means.
-func (d *Driver) exec(ctx context.Context, req Request, inv Invocation) (stdout, stderr []byte, code int, err error) {
-	timeout := d.timeout
-	if req.Timeout > 0 {
-		timeout = req.Timeout
-	}
-
-	// The parent is kept, not shadowed. Both contexts are done once the
-	// deadline passes, so the derived one alone cannot tell "the CLI hung" from
-	// "the caller went away" — and reporting a client disconnect as a
-	// five-minute timeout sends people hunting a stall that never happened.
-	parent := ctx
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	env, err := d.buildEnv(inv)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-
-	cmd := d.command(ctx, inv.Args, env, req.WorkDir)
-
-	// Bounded, because until the deadline passes the child decides how much
-	// memory the parent spends. A CLI looping on an error message would
-	// otherwise grow the heap for the whole timeout.
-	outBuf := boundedBuffer{limit: maxStdoutCapture}
-	errBuf := boundedBuffer{limit: maxStderrCapture}
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
-
-	runErr := cmd.Run()
-	stdout, stderr = outBuf.Bytes(), errBuf.Bytes()
-
-	var exitErr *exec.ExitError
-	switch {
-	case runErr == nil:
-		return stdout, stderr, 0, nil
-
-	case parent.Err() != nil:
-		return stdout, stderr, -1, fmt.Errorf("%w: %s was cancelled: %w",
-			ErrProviderUnavailable, d.descriptor.ID, parent.Err())
-
-	case ctx.Err() != nil:
-		// The stderr detail is carried here too: a CLI that explains itself
-		// before hanging is explaining the very thing being diagnosed.
-		return stdout, stderr, -1, fmt.Errorf("%w: %s did not finish within %s%s",
-			ErrProviderUnavailable, d.descriptor.ID, timeout, d.suffix(stderr))
-
-	case errors.As(runErr, &exitErr):
-		// Not an error from this function's point of view. The provider reads
-		// the code alongside the output it accompanies.
-		return stdout, stderr, exitErr.ExitCode(), nil
-
-	default:
-		// A missing or unrunnable binary is the common case here, and
-		// "fork/exec …: no such file or directory" does not say what to do
-		// about it. Checked only on the failure path, so a healthy run pays
-		// nothing for it.
-		if ready := d.Ready(); ready != nil {
-			return stdout, stderr, -1, ready
-		}
-		return stdout, stderr, -1, fmt.Errorf("%w: %s could not be run: %w%s",
-			ErrProviderUnavailable, d.descriptor.ID, runErr, d.suffix(stderr))
-	}
 }
 
 // command builds the child process. This is the only place in the library an

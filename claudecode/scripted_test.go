@@ -22,7 +22,7 @@ func flagValue(args []string, name string) (string, bool) {
 func build(t *testing.T, req agentic.Request) agentic.Invocation {
 	t.Helper()
 
-	inv, err := testProvider(t).Command(req)
+	inv, err := testProvider(t).StreamCommand(req)
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestAnUnusableRosterEntryIsRefusedBeforeAnyProcessStarts(t *testing.T) {
 		"no prompt":      {"curator": {Description: "d"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := testProvider(t).Command(agentic.Request{Prompt: "hi", Agents: agents})
+			_, err := testProvider(t).StreamCommand(agentic.Request{Prompt: "hi", Agents: agents})
 			if !errors.Is(err, agentic.ErrInvalidRequest) {
 				t.Fatalf("error = %v, want ErrInvalidRequest", err)
 			}
@@ -160,7 +160,7 @@ func TestAToolEntryTheCLIWouldReadAsWiderIsRefused(t *testing.T) {
 		"embedded comma":      "Read,Write",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := testProvider(t).Command(agentic.Request{
+			_, err := testProvider(t).StreamCommand(agentic.Request{
 				Prompt:       "hi",
 				AllowedTools: []string{"Read", tool},
 			})
@@ -195,7 +195,7 @@ func TestOrdinaryToolPatternsAreAccepted(t *testing.T) {
 // ErrProviderUnavailable, a typo wearing the costume of an outage. Refusing
 // here names the actual problem.
 func TestAnUnknownPermissionModeIsRefusedRatherThanPassedThrough(t *testing.T) {
-	_, err := testProvider(t).Command(agentic.Request{Prompt: "hi", PermissionMode: "acceptEdit"})
+	_, err := testProvider(t).StreamCommand(agentic.Request{Prompt: "hi", PermissionMode: "acceptEdit"})
 	if !errors.Is(err, agentic.ErrInvalidRequest) {
 		t.Fatalf("error = %v, want ErrInvalidRequest", err)
 	}

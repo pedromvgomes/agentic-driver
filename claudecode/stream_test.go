@@ -10,10 +10,12 @@ import (
 )
 
 // events decodes every line of a committed stream, mirroring what the driver
-// does with the live one.
-func events(t *testing.T, p *Provider, raw []byte) []agentic.Event {
+// does with the live one, and returns the fold alongside what a caller watching
+// would have seen.
+func events(t *testing.T, p *Provider, raw []byte) ([]agentic.Event, agentic.Decoder) {
 	t.Helper()
 
+	decoder := p.NewDecoder()
 	var out []agentic.Event
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	for scanner.Scan() {
@@ -21,9 +23,9 @@ func events(t *testing.T, p *Provider, raw []byte) []agentic.Event {
 		if len(line) == 0 {
 			continue
 		}
-		event, err := p.ParseEvent(line)
+		event, err := decoder.Decode(line)
 		if err != nil {
-			t.Fatalf("ParseEvent(%s): %v", line, err)
+			t.Fatalf("Decode(%s): %v", line, err)
 		}
 		if event.Kind == agentic.EventKindUnknown {
 			continue
@@ -33,29 +35,46 @@ func events(t *testing.T, p *Provider, raw []byte) []agentic.Event {
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	return out
+	return out, decoder
 }
 
-func TestAStreamYieldsTextAndEndsWithAResult(t *testing.T) {
+// decode runs one line through a fresh decoder, for the cases where a single
+// line is the whole point.
+func decodeOne(t *testing.T, p *Provider, line string) agentic.Event {
+	t.Helper()
+
+	event, err := p.NewDecoder().Decode([]byte(line))
+	if err != nil {
+		t.Fatalf("Decode(%s): %v", line, err)
+	}
+	return event
+}
+
+func TestAStreamYieldsTextAndFoldsToAResult(t *testing.T) {
 	p := testProvider(t)
 
-	got := events(t, p, golden(t, "stream.ndjson"))
+	got, decoder := events(t, p, golden(t, "stream.ndjson"))
 	if len(got) == 0 {
 		t.Fatal("the stream yielded no events at all")
 	}
 
-	last := got[len(got)-1]
-	if last.Kind != agentic.EventKindResult {
-		t.Errorf("the stream ends with %q, want the terminal result envelope", last.Kind)
+	result, complete := decoder.Result()
+	if !complete {
+		t.Fatal("a stream carrying a terminal envelope folded to no result")
 	}
-	if last.Result.SessionID == "" {
-		t.Error("the terminal event carries no session, so the stream cannot be resumed")
+	if result.SessionID == "" {
+		t.Error("the fold carries no session, so the run cannot be resumed")
 	}
 
 	var sawText bool
-	for _, event := range got[:len(got)-1] {
+	for _, event := range got {
 		if event.Kind == agentic.EventKindText && event.Text != "" {
 			sawText = true
+		}
+		// The terminal event is the driver's to build, so a decoder must never
+		// announce one itself.
+		if event.Kind == agentic.EventKindResult {
+			t.Error("the decoder emitted a result event of its own")
 		}
 	}
 	if !sawText {
@@ -74,30 +93,41 @@ func TestAnUnmodelledLineIsSkippedNotFailed(t *testing.T) {
 		`{"type":"system","subtype":"init"}`,
 		`{"type":"a_type_that_does_not_exist_yet"}`,
 	} {
-		event, err := p.ParseEvent([]byte(line))
-		if err != nil {
-			t.Errorf("ParseEvent(%s) failed instead of skipping: %v", line, err)
-		}
+		event := decodeOne(t, p, line)
 		if event.Kind != agentic.EventKindUnknown {
-			t.Errorf("ParseEvent(%s) = %q, want it skipped", line, event.Kind)
+			t.Errorf("Decode(%s) = %q, want it skipped", line, event.Kind)
 		}
 	}
 }
 
 // The terminal line of a stream is the same document a non-streaming run
-// prints. Parsing it twice, in two places, is how the two dialects drift.
-func TestTheTerminalEventIsParsedLikeAnyOtherEnvelope(t *testing.T) {
+// prints. Reading it twice, in two places, is how the two dialects drift.
+func TestTheFoldAgreesWithParsingTheTerminalLine(t *testing.T) {
 	p := testProvider(t)
 
-	got := events(t, p, golden(t, "stream.ndjson"))
-	last := got[len(got)-1]
+	raw := golden(t, "stream.ndjson")
+	_, decoder := events(t, p, raw)
+	folded, complete := decoder.Result()
+	if !complete {
+		t.Fatal("the stream folded to no result")
+	}
 
-	direct, err := p.Parse(last.Raw, nil, 0)
+	var terminal []byte
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if bytes.Contains(line, []byte(`"type": "result"`)) {
+			terminal = line
+		}
+	}
+	if terminal == nil {
+		t.Fatal("the fixture carries no terminal line")
+	}
+
+	direct, err := p.Parse(terminal, nil, 0)
 	if err != nil {
 		t.Fatalf("Parse of the terminal line: %v", err)
 	}
-	if direct != last.Result {
-		t.Errorf("the terminal event and Parse disagree:\nevent = %+v\nparse = %+v", last.Result, direct)
+	if direct != folded {
+		t.Errorf("the fold and Parse disagree:\nfold  = %+v\nparse = %+v", folded, direct)
 	}
 }
 
@@ -107,9 +137,9 @@ func TestAnEventOwnsItsRawLine(t *testing.T) {
 	p := testProvider(t)
 
 	line := []byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}`)
-	event, err := p.ParseEvent(line)
+	event, err := p.NewDecoder().Decode(line)
 	if err != nil {
-		t.Fatalf("ParseEvent: %v", err)
+		t.Fatalf("Decode: %v", err)
 	}
 
 	before := string(event.Raw)
@@ -128,7 +158,7 @@ func TestAnEventOwnsItsRawLine(t *testing.T) {
 func TestAStreamCarriesToolUseAndItsResult(t *testing.T) {
 	p := testProvider(t)
 
-	got := events(t, p, golden(t, "stream-tools.ndjson"))
+	got, _ := events(t, p, golden(t, "stream-tools.ndjson"))
 
 	var use, result *agentic.Event
 	for i := range got {
@@ -159,10 +189,7 @@ func TestAStreamCarriesToolUseAndItsResult(t *testing.T) {
 func TestThinkingBlocksAreNotYieldedAsText(t *testing.T) {
 	p := testProvider(t)
 
-	event, err := p.ParseEvent([]byte(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"deliberating"}]}}`))
-	if err != nil {
-		t.Fatalf("ParseEvent: %v", err)
-	}
+	event := decodeOne(t, p, `{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"deliberating"}]}}`)
 	if event.Kind != agentic.EventKindUnknown {
 		t.Errorf("a thinking block yielded a %q event", event.Kind)
 	}
@@ -178,10 +205,7 @@ func TestAToolResultIsTextWhicheverShapeItArrivesIn(t *testing.T) {
 		"block list":  `{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"plain output"}]}]}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			event, err := p.ParseEvent([]byte(line))
-			if err != nil {
-				t.Fatalf("ParseEvent: %v", err)
-			}
+			event := decodeOne(t, p, line)
 			if event.Kind != agentic.EventKindToolResult {
 				t.Fatalf("Kind = %q, want a tool result", event.Kind)
 			}

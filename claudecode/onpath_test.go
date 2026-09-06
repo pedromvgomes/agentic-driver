@@ -88,11 +88,11 @@ func TestBothProvidersSpeakTheSameDialect(t *testing.T) {
 
 	req := agentic.Request{Prompt: "hi", Model: "opus", MaxTurns: 2}
 
-	a, err := vendored.Command(req)
+	a, err := vendored.StreamCommand(req)
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}
-	b, err := onPath.Command(req)
+	b, err := onPath.StreamCommand(req)
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}

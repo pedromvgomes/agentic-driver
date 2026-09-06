@@ -37,9 +37,11 @@ var (
 	// failure runs with more authority than was asked for, never less.
 	ErrPermissionsUnsupported = errors.New("provider does not support scripted permissions")
 
-	// ErrStreamUnsupported means Stream was called on a provider that does not
-	// implement Streamer.
-	ErrStreamUnsupported = errors.New("provider does not support streaming")
+	// ErrTurnLimitUnsupported means Request.MaxTurns was set on a provider that
+	// does not implement TurnLimiter. Dropping the bound leaves the loop to run
+	// as long as the CLI's own default allows, while the caller believes a cap
+	// was applied.
+	ErrTurnLimitUnsupported = errors.New("provider does not support bounding the agent loop")
 
 	// ErrInstallUnsupported means the provider vendors no binary, so there is
 	// nothing for Install to fetch.
