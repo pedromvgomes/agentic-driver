@@ -15,9 +15,18 @@
 package codex
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
@@ -31,7 +40,17 @@ const ID = "codex"
 const BinaryName = "codex"
 
 // Provider is the Codex dialect.
-type Provider struct{}
+type Provider struct {
+	// publishing holds one lock per schema file, keyed by its name.
+	//
+	// It saves work and nothing else. Correctness across concurrent runs comes
+	// from publishing through a rename, which is atomic and which converges
+	// whichever writer lands last, and that holds between processes too where a
+	// lock could not reach. What the lock removes is the redundancy: runs
+	// sharing a schema arrive together, and without it each one writes what its
+	// siblings are writing at the same moment.
+	publishing sync.Map
+}
 
 // New builds the provider.
 func New() *Provider { return &Provider{} }
@@ -75,6 +94,13 @@ func (p *Provider) StreamCommand(req agentic.Request) (agentic.Invocation, error
 		return agentic.Invocation{}, err
 	}
 	args = append(args, permArgs...)
+	if req.Schema != nil {
+		schemaArgs, err := p.SchemaArgs(req.Schema)
+		if err != nil {
+			return agentic.Invocation{}, err
+		}
+		args = append(args, schemaArgs...)
+	}
 	// The prompt is positional and last, so nothing it contains can be read as
 	// a flag.
 	args = append(args, req.Prompt)
@@ -120,6 +146,167 @@ func (p *Provider) PermissionArgs(mode string, allowedTools []string) ([]string,
 	return []string{"-s", mode}, nil
 }
 
+// schemaDirName is the directory schema files are written under, inside the
+// system temporary directory. The caller's user id is appended, because the
+// system temporary directory is shared between accounts on a Unix host and a
+// directory two users contend for belongs safely to neither.
+const schemaDirName = "agentic-codex-schema"
+
+// SchemaArgs binds the final answer to a JSON Schema.
+//
+// Codex takes a PATH rather than the document, so the schema has to exist as a
+// file before the process starts. The file is named for the SHA-256 of its own
+// contents, which is what keeps that from being a per-run side effect: the same
+// schema always renders the same argv, so a logged or cached invocation stays
+// comparable and Run and Stream cannot issue different commands for one
+// request. Two runs sharing a schema share the file, and there is nothing
+// per-run left behind to reclaim.
+//
+// The digest names the file; it does not vouch for it. A file's contents are
+// established by reading them, so a path that already exists is compared
+// against the schema and republished when it differs — the name is a label
+// anything able to write the directory could have chosen, and a run constrained
+// to a schema nobody asked for still answers, in valid JSON, with nothing to
+// mark it wrong.
+func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
+	sum := sha256.Sum256(schema)
+	// The name carries the whole digest: a truncated one makes two different
+	// schemas collide onto one file, and the run that lost would be constrained
+	// to a shape nobody asked it for.
+	name := hex.EncodeToString(sum[:]) + ".json"
+
+	// One publisher at a time per schema, so a fan-out of runs sharing one does
+	// the work once instead of every goroutine repeating it. Loaded before
+	// LoadOrStore so the common path does not allocate a lock it discards.
+	gate, ok := p.publishing.Load(name)
+	if !ok {
+		gate, _ = p.publishing.LoadOrStore(name, new(sync.Mutex))
+	}
+	lock := gate.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// The file is checked on every run rather than remembered as published. A
+	// temporary directory is swept by the system, and a process that trusted
+	// its own earlier work would name a file that had since been reaped and go
+	// on naming it for as long as it lived. Confirming costs two syscalls and a
+	// read of a small file, against a run that is about to spawn a subprocess.
+	//
+	// The confirmation is of what is on disk NOW, not of what codex will open.
+	// Codex takes a path, so nothing here can hand it a descriptor, and a writer
+	// sharing this user's authority — the agent this driver is about to spawn
+	// among them — can still replace the file in between. The directory keeps
+	// out everyone else; within one account this is a shared file by design.
+	dir, err := p.schemaDir()
+	if err != nil {
+		return nil, fmt.Errorf("%w: codex: %w", agentic.ErrProviderUnavailable, err)
+	}
+	path := filepath.Join(dir, name)
+	if err := publish(path, schema); err != nil {
+		return nil, fmt.Errorf("%w: codex: writing the schema: %w", agentic.ErrProviderUnavailable, err)
+	}
+	return []string{"--output-schema", path}, nil
+}
+
+// schemaDir returns a directory this process can trust to hold only what it put
+// there.
+//
+// MkdirAll succeeds on a directory that already exists, whoever owns it and
+// whatever its mode, so creating one proves nothing about it. The checks after
+// it are what make the trust real: a directory owned by another account, opened
+// to another account, or standing in for something that is not a directory is
+// refused rather than used, because everything downstream treats a file found
+// there as this process's own.
+func (p *Provider) schemaDir() (string, error) {
+	root, err := schemaRoot()
+	if err != nil {
+		return "", err
+	}
+
+	dir := filepath.Join(root, fmt.Sprintf("%s-%d", schemaDirName, callerID()))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("making a directory for the schema: %w", err)
+	}
+
+	// Lstat, not Stat: a symlink standing where the directory should be is the
+	// thing being refused, and Stat would report whatever it points at.
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("inspecting the schema directory: %w", err)
+	}
+	switch {
+	case !info.IsDir():
+		return "", fmt.Errorf("%s is not a directory", dir)
+	case !ownedByCaller(info):
+		return "", fmt.Errorf("%s belongs to another user", dir)
+	case !privateToCaller(info):
+		return "", fmt.Errorf("%s is open to other users (mode %#o)", dir, info.Mode().Perm())
+	}
+	return dir, nil
+}
+
+// publish makes path hold content, and is a no-op when it already does.
+//
+// The existing file is READ rather than merely found: a name that is a digest
+// says what the contents must be, not what they are, and the difference is
+// everything on a machine where something else could have created the file
+// first. A stale or planted document is replaced, and so is anything at the
+// name that is not a regular file — a symlink, which would otherwise send codex
+// to read whatever it points at, or a directory, which a rename cannot write
+// over at all.
+//
+// The replacement is written under a temporary name and renamed into place, so
+// a concurrent run reads either the previous complete file or this one and
+// never a half-written document, which codex would reject as malformed JSON
+// before the model ever ran.
+func publish(path string, content []byte) error {
+	switch info, err := os.Lstat(path); {
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		// Anything other than absence is reported as itself. Falling through
+		// would report whatever the write failed with instead, naming a
+		// temporary file that has nothing to do with the obstruction.
+		return fmt.Errorf("inspecting %s: %w", path, err)
+
+	case err == nil && info.Mode().IsRegular():
+		// The path carries no caller-supplied component: every segment is
+		// either the verified schema directory or the hex of a digest this
+		// package computed, and Lstat has just established this one is a
+		// regular file rather than a link out of it.
+		//
+		// A file that cannot be read is republished rather than reported: not
+		// being able to establish the contents is the same answer as their
+		// being wrong.
+		current, readErr := os.ReadFile(path) // #nosec G304 -- a digest-named file under a directory this package verified
+		if readErr == nil && bytes.Equal(current, content) {
+			return nil
+		}
+	case err == nil:
+		// Removing a symlink removes the link and not its target, so nothing
+		// outside this directory is touched.
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".schema-*")
+	if err != nil {
+		return err
+	}
+	// Removing the temporary name is safe after a successful rename too: it no
+	// longer refers to the published file. Without it, a failure between here
+	// and the rename leaves a partial file nothing will ever clean up.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 // AuthEnv carries an OpenAI key.
 //
 // A different variable from claudecode's, which is the point of the vocabulary
@@ -159,7 +346,8 @@ func (p *Provider) DenyEnv() []string {
 // is no signed manifest to pin against, so claiming a verified build would be a
 // claim it cannot keep.
 var (
-	_ agentic.Provider  = (*Provider)(nil)
-	_ agentic.Isolator  = (*Provider)(nil)
-	_ agentic.Permitter = (*Provider)(nil)
+	_ agentic.Provider          = (*Provider)(nil)
+	_ agentic.Isolator          = (*Provider)(nil)
+	_ agentic.Permitter         = (*Provider)(nil)
+	_ agentic.SchemaConstrainer = (*Provider)(nil)
 )

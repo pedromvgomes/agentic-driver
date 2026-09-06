@@ -12,7 +12,7 @@ import (
 
 // fold runs a captured stream through a decoder the way the driver does: one
 // line at a time, in order, skipping blanks.
-func fold(t *testing.T, name string) (agentic.Result, bool, []agentic.Event) {
+func fold(t *testing.T, name string, req agentic.Request) (agentic.Result, bool, []agentic.Event) {
 	t.Helper()
 
 	raw, err := os.ReadFile(filepath.Join("testdata", name))
@@ -20,7 +20,7 @@ func fold(t *testing.T, name string) (agentic.Result, bool, []agentic.Event) {
 		t.Fatalf("read the fixture: %v", err)
 	}
 
-	decoder := New().NewDecoder()
+	decoder := New().NewDecoder(req)
 	var events []agentic.Event
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -39,7 +39,7 @@ func fold(t *testing.T, name string) (agentic.Result, bool, []agentic.Event) {
 }
 
 func TestASuccessfulTurnIsFoldedFromTheWholeStream(t *testing.T) {
-	result, complete, _ := fold(t, "success.ndjson")
+	result, complete, _ := fold(t, "success.ndjson", agentic.Request{})
 
 	if !complete {
 		t.Fatal("a stream ending in turn.completed did not produce a result")
@@ -71,7 +71,7 @@ func TestASuccessfulTurnIsFoldedFromTheWholeStream(t *testing.T) {
 // choice the CLI never confirmed making.
 func TestTheFieldsCodexNeverReportsStayZero(t *testing.T) {
 	for _, name := range []string{"success.ndjson", "success-mini.ndjson", "tool-use.ndjson"} {
-		result, _, _ := fold(t, name)
+		result, _, _ := fold(t, name, agentic.Request{})
 
 		if result.Usage.CostUSD != 0 {
 			t.Errorf("%s: CostUSD = %v, but codex quotes no cost", name, result.Usage.CostUSD)
@@ -83,7 +83,7 @@ func TestTheFieldsCodexNeverReportsStayZero(t *testing.T) {
 }
 
 func TestASecondModelFoldsTheSameWay(t *testing.T) {
-	result, complete, _ := fold(t, "success-mini.ndjson")
+	result, complete, _ := fold(t, "success-mini.ndjson", agentic.Request{})
 
 	if !complete || result.Text != "pong" {
 		t.Fatalf("result = %+v, want a completed turn answering pong", result)
@@ -97,7 +97,7 @@ func TestASecondModelFoldsTheSameWay(t *testing.T) {
 // what it is about to do, so keeping the first reports a run's opening remark
 // as its conclusion.
 func TestTheAnswerIsTheLastAgentMessageNotTheFirst(t *testing.T) {
-	result, complete, events := fold(t, "tool-use.ndjson")
+	result, complete, events := fold(t, "tool-use.ndjson", agentic.Request{})
 
 	if !complete {
 		t.Fatal("the tool-using stream produced no result")
@@ -127,7 +127,7 @@ func TestTheAnswerIsTheLastAgentMessageNotTheFirst(t *testing.T) {
 // job, and the agent reported it could not act. Reading it as a failure would
 // turn a correctly restricted run into an error.
 func TestASandboxRefusalIsNotAFailure(t *testing.T) {
-	result, complete, _ := fold(t, "sandbox-refusal.ndjson")
+	result, complete, _ := fold(t, "sandbox-refusal.ndjson", agentic.Request{})
 
 	if !complete {
 		t.Fatal("the refusal stream produced no result")
@@ -149,7 +149,7 @@ func TestAFailedTurnIsACompleteResultNotAnOutage(t *testing.T) {
 		{"a rejected credential", "rejected-auth.ndjson", "401"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, complete, _ := fold(t, tc.fixture)
+			result, complete, _ := fold(t, tc.fixture, agentic.Request{})
 
 			if !complete {
 				t.Fatal("a stream ending in turn.failed produced no result, so the driver would report an outage")
@@ -171,7 +171,7 @@ func TestAFailedTurnIsACompleteResultNotAnOutage(t *testing.T) {
 // notices, a fallback to another transport — is bookkeeping about the
 // connection, not a statement about the turn.
 func TestReconnectionNoticesAreNotEvents(t *testing.T) {
-	_, _, events := fold(t, "rejected-auth.ndjson")
+	_, _, events := fold(t, "rejected-auth.ndjson", agentic.Request{})
 
 	for _, event := range events {
 		if strings.Contains(event.Text, "Reconnecting") {
@@ -184,7 +184,7 @@ func TestReconnectionNoticesAreNotEvents(t *testing.T) {
 // decoder reports incomplete, which is what makes the driver call it an outage
 // rather than an empty success.
 func TestAUsageErrorLeavesNoResultToReport(t *testing.T) {
-	decoder := New().NewDecoder()
+	decoder := New().NewDecoder(agentic.Request{})
 	if _, complete := decoder.Result(); complete {
 		t.Error("a decoder that has seen nothing reports a result")
 	}
@@ -203,7 +203,7 @@ func TestAUsageErrorLeavesNoResultToReport(t *testing.T) {
 // Reporting that as a result would answer a run that produced nothing as a
 // successful empty one.
 func TestATruncatedStreamIsNotAResult(t *testing.T) {
-	decoder := New().NewDecoder()
+	decoder := New().NewDecoder(agentic.Request{})
 	for _, line := range []string{
 		`{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}`,
 		`{"type":"turn.started"}`,
@@ -220,7 +220,7 @@ func TestATruncatedStreamIsNotAResult(t *testing.T) {
 }
 
 func TestALineThatIsNotJSONEndsTheRun(t *testing.T) {
-	if _, err := New().NewDecoder().Decode([]byte("not json at all")); err == nil {
+	if _, err := New().NewDecoder(agentic.Request{}).Decode([]byte("not json at all")); err == nil {
 		t.Error("a line that is not JSON decoded without complaint")
 	}
 }
@@ -228,7 +228,7 @@ func TestALineThatIsNotJSONEndsTheRun(t *testing.T) {
 // An event type this package does not model is skipped, not failed: a release
 // adding one is not a reason to break a run that is otherwise working.
 func TestAnUnmodelledEventIsSkipped(t *testing.T) {
-	event, err := New().NewDecoder().Decode([]byte(`{"type":"some.future.event","detail":{}}`))
+	event, err := New().NewDecoder(agentic.Request{}).Decode([]byte(`{"type":"some.future.event","detail":{}}`))
 	if err != nil {
 		t.Fatalf("an unmodelled event failed the run: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestAnUnmodelledEventIsSkipped(t *testing.T) {
 // another.
 func TestTheDecoderDoesNotEmitTheTerminalEvent(t *testing.T) {
 	for _, name := range []string{"success.ndjson", "turn-failed-model.ndjson", "tool-use.ndjson"} {
-		_, _, events := fold(t, name)
+		_, _, events := fold(t, name, agentic.Request{})
 		for _, event := range events {
 			if event.Kind == agentic.EventKindResult {
 				t.Errorf("%s: the decoder emitted a result event itself", name)
@@ -254,8 +254,8 @@ func TestTheDecoderDoesNotEmitTheTerminalEvent(t *testing.T) {
 // Each decoder folds exactly one run. Sharing one would carry the first run's
 // answer and token counts into the second.
 func TestEachRunGetsItsOwnDecoder(t *testing.T) {
-	first, _, _ := fold(t, "success.ndjson")
-	second, _, _ := fold(t, "success-mini.ndjson")
+	first, _, _ := fold(t, "success.ndjson", agentic.Request{})
+	second, _, _ := fold(t, "success-mini.ndjson", agentic.Request{})
 
 	if first.SessionID == second.SessionID {
 		t.Error("two runs folded to the same session id")

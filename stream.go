@@ -85,9 +85,10 @@ func (d *Driver) Stream(ctx context.Context, req Request) (iter.Seq2[Event, erro
 			}
 		}()
 
-		// One decoder for one run. Its state is the fold that becomes the
-		// terminal Result, so it must not be shared with any other invocation.
-		decoder := d.provider.NewDecoder()
+		// One decoder for one run, built from the request that run answers.
+		// Its state is the fold that becomes the terminal Result, so it must
+		// not be shared with any other invocation.
+		decoder := d.provider.NewDecoder(req)
 
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64<<10), maxEventLine)

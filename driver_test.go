@@ -39,7 +39,7 @@ func (s *stub) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	return agentic.Invocation{Args: append([]string{"--prompt", req.Prompt}, s.args...), Env: s.env}, nil
 }
 
-func (s *stub) NewDecoder() agentic.Decoder { return &stubDecoder{stub: s} }
+func (s *stub) NewDecoder(agentic.Request) agentic.Decoder { return &stubDecoder{stub: s} }
 
 // stubDecoder reads either shape a test needs: a line naming an event kind, or
 // a bare Result document standing in for a run that only ever says one thing.
@@ -623,6 +623,129 @@ func TestATurnLimitReachesAProviderThatCanBoundTheLoop(t *testing.T) {
 	if !slices.Contains(fake.Recorded(t).Args, "--max-turns") {
 		t.Errorf("argv = %q, want the bound the provider spelled", fake.Recorded(t).Args)
 	}
+}
+
+// A schema a provider cannot honour is refused before a process starts. The
+// failure of dropping it is the quietest of the lot: the run answers the prompt
+// in prose, competently, and the caller discovers it wherever it tries to
+// unmarshal that prose.
+func TestASchemaIsRefusedByAProviderThatCannotConstrainOutput(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage(`{"type":"object"}`)})
+	if !errors.Is(err, agentic.ErrSchemaUnsupported) {
+		t.Errorf("error = %v, want ErrSchemaUnsupported", err)
+	}
+	if fake.Ran() {
+		t.Error("the CLI was spawned for a constraint it cannot honour")
+	}
+}
+
+// The gate is the capability, not the field.
+func TestASchemaReachesAProviderThatCanConstrainOutput(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &constraining{}, fake)
+
+	if _, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage(`{"type":"object"}`)}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !slices.Contains(fake.Recorded(t).Args, "--schema") {
+		t.Errorf("argv = %q, want the constraint the provider spelled", fake.Recorded(t).Args)
+	}
+}
+
+// A schema that was SET but holds nothing is still a request to be answered in
+// a shape. Measuring its length instead of its presence would let the empty case
+// past this gate, past the provider and past both decoders, to arrive as a clean
+// unconstrained success — the silent drop the gate exists to prevent, reached
+// through the gate itself.
+func TestAnEmptySchemaIsRefusedRatherThanIgnored(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &constraining{}, fake)
+
+	_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage{}})
+	if !errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Errorf("error = %v, want ErrInvalidRequest", err)
+	}
+	if fake.Ran() {
+		t.Error("the CLI was spawned for a schema that describes nothing")
+	}
+}
+
+// A JSON Schema is an object. The document this rules out that looks harmless is
+// the literal null, which is what marshalling a nil value produces — so a caller
+// whose schema came from an unset pointer learns that here, rather than being
+// told the run failed to answer in a shape it never described.
+func TestASchemaThatIsNotAnObjectIsRefused(t *testing.T) {
+	for _, schema := range []string{`null`, `[]`, `"a string"`, `42`} {
+		t.Run(schema, func(t *testing.T) {
+			fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+			d := driver(t, &constraining{}, fake)
+
+			_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage(schema)})
+			if !errors.Is(err, agentic.ErrInvalidRequest) {
+				t.Errorf("error = %v, want ErrInvalidRequest", err)
+			}
+			if fake.Ran() {
+				t.Error("the CLI was spawned for a document that cannot be a schema")
+			}
+		})
+	}
+}
+
+// Checked once, in the driver, so the same typo does not become a usage error
+// on one CLI and a rejected turn on another.
+func TestASchemaThatIsNotJSONIsRefusedBeforeAnythingRuns(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &constraining{}, fake)
+
+	_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage(`{"type":`)})
+	if !errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Errorf("error = %v, want ErrInvalidRequest", err)
+	}
+	if fake.Ran() {
+		t.Error("the CLI was spawned for a schema it could not have read")
+	}
+}
+
+// The check stops at well-formedness. Whether a well-formed document is a
+// USABLE schema is the vendor's judgement, and a second opinion here could only
+// disagree with the CLI that has to honour it.
+func TestAWellFormedSchemaTheVendorMayDislikeStillReachesTheCLI(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &constraining{}, fake)
+
+	if _, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", Schema: json.RawMessage(`{"type":"banana"}`)}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !fake.Ran() {
+		t.Error("the driver judged a schema the CLI is the authority on")
+	}
+}
+
+// constraining is a stub that can bind its answer to a schema.
+type constraining struct {
+	stub
+}
+
+func (c *constraining) SchemaArgs(schema json.RawMessage) ([]string, error) {
+	return []string{"--schema", string(schema)}, nil
+}
+
+func (c *constraining) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
+	inv, err := c.stub.StreamCommand(req)
+	if err != nil {
+		return agentic.Invocation{}, err
+	}
+	if len(req.Schema) > 0 {
+		args, err := c.SchemaArgs(req.Schema)
+		if err != nil {
+			return agentic.Invocation{}, err
+		}
+		inv.Args = append(inv.Args, args...)
+	}
+	return inv, nil
 }
 
 // limiting is a stub that can bound the agent loop.

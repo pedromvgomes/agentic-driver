@@ -14,6 +14,7 @@
 package codex
 
 import (
+	"encoding/json"
 	"os/exec"
 	"strings"
 	"testing"
@@ -174,5 +175,68 @@ func TestTheRealCLIRejectsAnUnknownSandboxBeforeSpawning(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read-only") {
 		t.Errorf("error = %q, want it to name what codex accepts", err)
+	}
+}
+
+// The captured claim: the real CLI still constrains its final answer to the
+// schema, and the decoder still finds it.
+func TestTheRealCLIStillConstrainsItsAnswer(t *testing.T) {
+	d := integrationDriver(t)
+
+	result, err := d.Run(t.Context(), agentic.Request{
+		Prompt: "Reply in plain English prose only. Do not output any JSON. " +
+			"What is the capital of France?",
+		PermissionMode: "read-only",
+		Schema: json.RawMessage(`{"type":"object",` +
+			`"properties":{"answer":{"type":"string"},"confidence":{"type":"integer"}},` +
+			`"required":["answer","confidence"],"additionalProperties":false}`),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("the CLI reported an error: %s", result.Text)
+	}
+
+	// The prompt argues against the schema on purpose. A CLI that merely
+	// SUGGESTS the shape answers this one in prose.
+	var answer struct {
+		Answer     string `json:"answer"`
+		Confidence int    `json:"confidence"`
+	}
+	if err := json.Unmarshal(result.Structured, &answer); err != nil {
+		t.Fatalf("Structured is not the schema's document: %v (%s)", err, result.Structured)
+	}
+	if !strings.Contains(strings.ToLower(answer.Answer), "paris") {
+		t.Errorf("answer = %q, want the question answered inside the shape", answer.Answer)
+	}
+}
+
+// A schema nothing can satisfy is a grammar the model cannot finish. It
+// generates until its output ceiling, reconnects, and codex reports a failed
+// turn — which is a VERDICT, not an outage: the run happened and said so.
+//
+// This is the slowest test here by a wide margin: roughly two minutes, ten
+// reconnections and a whole output-token budget. It is worth its cost because
+// the alternative reading — treating that ending as an unreadable stream —
+// would turn every expensive failure into a retry.
+func TestAnUnsatisfiableSchemaIsAVerdictNotAnOutage(t *testing.T) {
+	d := integrationDriver(t)
+
+	result, err := d.Run(t.Context(), agentic.Request{
+		Prompt:         "Set n to 7. Answer immediately.",
+		PermissionMode: "read-only",
+		Schema: json.RawMessage(`{"type":"object",` +
+			`"properties":{"n":{"type":"integer","minimum":10,"maximum":5}},` +
+			`"required":["n"],"additionalProperties":false}`),
+	})
+	if err != nil {
+		t.Fatalf("Run reported an outage for a turn the CLI finished: %v", err)
+	}
+	if !result.IsError {
+		t.Errorf("IsError = false on a run that produced no payload: %+v", result)
+	}
+	if result.Structured != nil {
+		t.Errorf("Structured = %s, want nil", result.Structured)
 	}
 }

@@ -3,6 +3,7 @@ package claudecode
 import (
 	"bufio"
 	"bytes"
+	"reflect"
 	"testing"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
@@ -12,10 +13,10 @@ import (
 // events decodes every line of a committed stream, mirroring what the driver
 // does with the live one, and returns the fold alongside what a caller watching
 // would have seen.
-func events(t *testing.T, p *Provider, raw []byte) ([]agentic.Event, agentic.Decoder) {
+func events(t *testing.T, p *Provider, raw []byte, req agentic.Request) ([]agentic.Event, agentic.Decoder) {
 	t.Helper()
 
-	decoder := p.NewDecoder()
+	decoder := p.NewDecoder(req)
 	var out []agentic.Event
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
 	for scanner.Scan() {
@@ -43,7 +44,7 @@ func events(t *testing.T, p *Provider, raw []byte) ([]agentic.Event, agentic.Dec
 func decodeOne(t *testing.T, p *Provider, line string) agentic.Event {
 	t.Helper()
 
-	event, err := p.NewDecoder().Decode([]byte(line))
+	event, err := p.NewDecoder(agentic.Request{}).Decode([]byte(line))
 	if err != nil {
 		t.Fatalf("Decode(%s): %v", line, err)
 	}
@@ -53,7 +54,7 @@ func decodeOne(t *testing.T, p *Provider, line string) agentic.Event {
 func TestAStreamYieldsTextAndFoldsToAResult(t *testing.T) {
 	p := testProvider(t)
 
-	got, decoder := events(t, p, golden(t, "stream.ndjson"))
+	got, decoder := events(t, p, golden(t, "stream.ndjson"), agentic.Request{})
 	if len(got) == 0 {
 		t.Fatal("the stream yielded no events at all")
 	}
@@ -106,7 +107,7 @@ func TestTheFoldAgreesWithParsingTheTerminalLine(t *testing.T) {
 	p := testProvider(t)
 
 	raw := golden(t, "stream.ndjson")
-	_, decoder := events(t, p, raw)
+	_, decoder := events(t, p, raw, agentic.Request{})
 	folded, complete := decoder.Result()
 	if !complete {
 		t.Fatal("the stream folded to no result")
@@ -126,7 +127,7 @@ func TestTheFoldAgreesWithParsingTheTerminalLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse of the terminal line: %v", err)
 	}
-	if direct != folded {
+	if !reflect.DeepEqual(direct, folded) {
 		t.Errorf("the fold and Parse disagree:\nfold  = %+v\nparse = %+v", folded, direct)
 	}
 }
@@ -137,7 +138,7 @@ func TestAnEventOwnsItsRawLine(t *testing.T) {
 	p := testProvider(t)
 
 	line := []byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}`)
-	event, err := p.NewDecoder().Decode(line)
+	event, err := p.NewDecoder(agentic.Request{}).Decode(line)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
@@ -158,7 +159,7 @@ func TestAnEventOwnsItsRawLine(t *testing.T) {
 func TestAStreamCarriesToolUseAndItsResult(t *testing.T) {
 	p := testProvider(t)
 
-	got, _ := events(t, p, golden(t, "stream-tools.ndjson"))
+	got, _ := events(t, p, golden(t, "stream-tools.ndjson"), agentic.Request{})
 
 	var use, result *agentic.Event
 	for i := range got {

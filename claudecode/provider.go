@@ -207,7 +207,28 @@ func (p *dialect) commonArgs(req agentic.Request) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(args, agentArgs...), nil
+	args = append(args, agentArgs...)
+	if req.Schema != nil {
+		schemaArgs, err := p.SchemaArgs(req.Schema)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, schemaArgs...)
+	}
+	return args, nil
+}
+
+// SchemaArgs binds the final answer to a JSON Schema.
+//
+// The schema goes on the command line as the document itself, so nothing is
+// written to disk and the argv is a pure function of the request.
+//
+// The constraint is served by a tool the CLI offers the model, StructuredOutput,
+// and that tool is NOT subject to --allowedTools: a run restricted to Read still
+// answers in the required shape. Reconciling the two here would refuse requests
+// the CLI honours perfectly well.
+func (p *dialect) SchemaArgs(schema json.RawMessage) ([]string, error) {
+	return []string{"--json-schema", string(schema)}, nil
 }
 
 // TurnLimitArgs bounds the agent loop.
@@ -447,6 +468,8 @@ var (
 	_ agentic.TurnLimiter   = (*Provider)(nil)
 	_ agentic.Installer     = (*Provider)(nil)
 
+	_ agentic.SchemaConstrainer = (*Provider)(nil)
+
 	// The same dialect, minus the one capability that depends on owning the
 	// binary. A PathProvider that gained an Installer would be claiming to
 	// have verified a build it merely found.
@@ -457,6 +480,8 @@ var (
 	_ agentic.AgentDefiner  = (*PathProvider)(nil)
 	_ agentic.Permitter     = (*PathProvider)(nil)
 	_ agentic.TurnLimiter   = (*PathProvider)(nil)
+
+	_ agentic.SchemaConstrainer = (*PathProvider)(nil)
 )
 
 // Install downloads and verifies a version.

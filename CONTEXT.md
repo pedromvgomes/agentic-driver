@@ -24,12 +24,22 @@ _Avoid_: feature flag, option, supports-X boolean.
 **Invocation**:
 The argv after the executable plus the non-secret environment the dialect requires.
 
+**Schema**:
+A JSON Schema the final answer must conform to, and always a JSON object — a document that
+could not be a schema is refused before a run starts. It is a **Capability**: a provider
+that cannot constrain its output does not implement `SchemaConstrainer`, and the **Driver**
+refuses the request rather than returning prose nothing marks as unconstrained. Asking for
+a schema is asking by setting one, not by setting a non-empty one: an empty schema is a
+question about shape that nobody managed to phrase, not the absence of the question.
+_Avoid_: format, output format (the latter is a CLI flag about the transcript, not the answer).
+
 ### Outcomes
 
 **Verdict**:
-The CLI ran, was understood, and reported an outcome — including an outcome it considers
-a failure. A verdict is a populated **Result** with a nil error, and `IsError` distinguishes
-a bad verdict from a good one.
+The CLI ran, was understood, and an outcome was determined — including an outcome it
+considers a failure. A verdict is a populated **Result** with a nil error, and `IsError`
+distinguishes a bad verdict from a good one. The outcome is usually the CLI's own; an
+**unmet constraint** is the one the library determines for itself.
 _Avoid_: failure, error (both are ambiguous between the two outcomes).
 
 **Outage**:
@@ -38,10 +48,24 @@ cancellation, or output that is not decodable. An outage is `ErrProviderUnavaila
 carries no **Result**.
 _Avoid_: crash, failure.
 
+**Unmet constraint**:
+A run given a **Schema** that produced no structured payload. It is a **Verdict**: the
+`Result` is populated, the error is nil, `IsError` is set and `Structured` is nil, and
+`Text` carries the agent's own account of why it could not answer in the required shape.
+The CLI may have called the run a success — Claude Code does, on exit 0 — but the shape
+the caller required is the library's to judge, because a caller that asked for JSON and
+received prose has not been answered.
+_Avoid_: schema error, validation failure (both suggest an **Outage**).
+
 **Refusal**:
 The agent declining to do something because its sandbox forbids it. A refusal is a
 **Verdict** of success: the CLI did exactly what it was configured to do. It is not an
 **Outage** and it does not set `IsError`.
+
+A run that carried a **Schema** is the exception, and the **unmet constraint** wins:
+an agent explaining in prose that it was not allowed to act has not answered in the shape
+it was required to answer in, so `IsError` is set. The sandbox still did its job; the
+caller still did not get what it asked for, and those are two different questions.
 
 ### The stream
 
@@ -86,6 +110,16 @@ Resolution: `Request.PermissionMode` is spelled in the **Provider**'s own vocabu
 each **Provider** maps it to the axis that actually constrains authority. For Codex that
 is `sandbox_mode`; `approval_policy` is left alone because `codex exec` never prompts.
 
+**"Structured output"** — one word for two mechanisms that fail differently.
+Codex constrains the decoder itself: the final `agent_message` cannot be invalid JSON, but
+it can be schema-valid nonsense, and a schema nothing satisfies makes the run generate
+until it hits its output ceiling and reports a failed turn. Claude Code offers the model a
+tool, validates each call against the schema, feeds a rejection back and lets it retry —
+and when it gives up it answers in prose, on exit 0, calling the run a success.
+Resolution: the library reports the OUTCOME, never the mechanism. A payload is
+`Result.Structured`; its absence on a run that required one is an **unmet constraint**.
+Nothing in the library derives behaviour from which of the two produced it.
+
 **"Tool allowlist"** — assumed to exist everywhere because Claude Code has one.
 Resolution: it is a **Capability**, not a given. Codex has no per-tool allowlist of any
 kind, so it refuses `AllowedTools` rather than accepting and discarding it.
@@ -103,6 +137,15 @@ kind, so it refuses `AllowedTools` rather than accepting and discarding it.
 > **Domain expert:** When there's no stream to read. Pass a flag codex doesn't know and you
 > get exit 2, empty stdout, and a usage message on stderr. Nothing there is a statement
 > about the request, so that's an **Outage**.
+> **Dev:** Now one with a **Schema**. Claude Code exited 0, `subtype` is `success`, and it
+> answered in prose instead of the shape. Another refusal?
+> **Domain expert:** No — nothing forbade it, it just could not satisfy the schema. That's
+> an **unmet constraint**, and it's the one outcome we determine ourselves: `IsError` true,
+> `Structured` nil, whatever the CLI's own exit code says. A caller that asked for JSON and
+> got prose has not been answered.
+> **Dev:** And if the sandbox HAD forbidden it, on a run carrying a schema?
+> **Domain expert:** Still an unmet constraint. A refusal is a successful verdict about
+> authority; the schema is a question about shape. The run failed the second one.
 > **Dev:** Last one — both reported one turn. Same thing?
 > **Domain expert:** Different units entirely. Claude counted one loop iteration; codex
 > counted one whole loop. Don't compare them.

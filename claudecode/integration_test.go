@@ -14,6 +14,7 @@
 package claudecode
 
 import (
+	"encoding/json"
 	"os"
 	"testing"
 	"time"
@@ -233,5 +234,70 @@ func TestARequestModelOverridesTheDriverAgainstTheRealCLI(t *testing.T) {
 	// The driver's own setting is unchanged by a request that overrode it.
 	if got := d.Model(); got != "claude-sonnet-5" {
 		t.Errorf("Model() = %q after an overriding request, want the driver's own setting intact", got)
+	}
+}
+
+// The captured claim: the real CLI still constrains its final answer, and the
+// answer still arrives in the envelope's structured_output.
+func TestTheRealCLIStillConstrainsItsAnswer(t *testing.T) {
+	d := integrationDriver(t)
+
+	result, err := d.Run(t.Context(), agentic.Request{
+		Prompt: "Reply in plain English prose only. Do not output any JSON. " +
+			"What is the capital of France?",
+		Model: "haiku",
+		Schema: json.RawMessage(`{"type":"object",` +
+			`"properties":{"answer":{"type":"string"},"confidence":{"type":"integer"}},` +
+			`"required":["answer","confidence"],"additionalProperties":false}`),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("the CLI reported an error: %s", result.Text)
+	}
+
+	// The prompt argues against the schema on purpose. A CLI that merely
+	// SUGGESTS the shape answers this one in prose.
+	var answer struct {
+		Answer     string `json:"answer"`
+		Confidence int    `json:"confidence"`
+	}
+	if err := json.Unmarshal(result.Structured, &answer); err != nil {
+		t.Fatalf("Structured is not the schema's document: %v (%s)", err, result.Structured)
+	}
+	if !strings.Contains(strings.ToLower(answer.Answer), "paris") {
+		t.Errorf("answer = %q, want the question answered inside the shape", answer.Answer)
+	}
+}
+
+// The single most fragile claim in the design, and the reason it is verified
+// live rather than by fixture alone. Given a schema nothing satisfies, the CLI
+// validates each attempt, rejects it, lets the model retry, and then answers in
+// PROSE on exit 0 with is_error false and subtype "success". Only the absence
+// of structured_output distinguishes that from an answer.
+//
+// The day the CLI starts setting is_error on a give-up, this is what notices.
+func TestARunThatGivesUpOnTheShapeIsStillReportedAsSuccessByTheCLI(t *testing.T) {
+	d := integrationDriver(t)
+
+	result, err := d.Run(t.Context(), agentic.Request{
+		Prompt: "Set n to 7. Answer immediately.",
+		Model:  "haiku",
+		Schema: json.RawMessage(`{"type":"object",` +
+			`"properties":{"n":{"type":"integer","minimum":10,"maximum":5}},` +
+			`"required":["n"],"additionalProperties":false}`),
+	})
+	if err != nil {
+		t.Fatalf("Run reported an outage for a turn the CLI finished: %v", err)
+	}
+	if !result.IsError {
+		t.Errorf("IsError = false on a run that produced no payload: %+v", result)
+	}
+	if result.Structured != nil {
+		t.Errorf("Structured = %s, want nil", result.Structured)
+	}
+	if result.Text == "" {
+		t.Error("Text is empty, so the agent's account of why it could not answer is lost")
 	}
 }

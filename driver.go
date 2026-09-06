@@ -2,6 +2,7 @@ package agentic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -312,6 +313,25 @@ func (d *Driver) prepare(req Request) (Request, error) {
 		}
 	}
 
+	// A dropped schema fails the way a dropped roster does: the run answers
+	// well and in the wrong shape, and the caller finds out where it tries to
+	// unmarshal prose.
+	//
+	// The test is whether a schema was SET, not whether it holds anything. A
+	// caller whose schema-building step produced nothing has still asked to be
+	// answered in a shape, and measuring the length instead would let the empty
+	// case slip past this gate, past the provider and past both decoders, to
+	// arrive as a clean unconstrained success — which is the exact silent drop
+	// the gate exists to prevent, reached through the gate itself.
+	if req.Schema != nil {
+		if _, ok := d.provider.(SchemaConstrainer); !ok {
+			return req, fmt.Errorf("%w: %s", ErrSchemaUnsupported, d.descriptor.ID)
+		}
+		if err := checkSchema(req.Schema); err != nil {
+			return req, err
+		}
+	}
+
 	// The model is settled before the provider sees the request, so Command is
 	// handed a name the CLI accepts rather than each provider having to
 	// remember to resolve one.
@@ -321,6 +341,30 @@ func (d *Driver) prepare(req Request) (Request, error) {
 	req.Model = d.ResolveModel(req.Model)
 
 	return req, nil
+}
+
+// checkSchema refuses a document that cannot be a JSON Schema.
+//
+// Checked once, here, so the two CLIs answer the same way to the same mistake.
+// Left to them it is a usage error on one and a rejected turn on the other, and
+// only one of those is an outage.
+//
+// It stops at the shape a schema has to have, and a JSON Schema is an object.
+// The one this rules out that looks harmless is the literal null, which is what
+// marshalling a nil value produces — so a caller whose schema came from an
+// unset pointer would otherwise constrain a run to nothing and be told the run
+// failed to answer in a shape it never described. Whether a well-formed OBJECT
+// is a usable schema stays the vendor's judgement, because a second opinion
+// here could only disagree with the CLI that has to honour it.
+func checkSchema(schema json.RawMessage) error {
+	if !json.Valid(schema) {
+		return fmt.Errorf("%w: the schema is not valid JSON", ErrInvalidRequest)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(schema, &object); err != nil || object == nil {
+		return fmt.Errorf("%w: the schema is not a JSON object", ErrInvalidRequest)
+	}
+	return nil
 }
 
 // invocation asks the provider for the command.

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
@@ -169,7 +170,7 @@ func TestParseIsIndifferentToTheExitCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse at exit 137: %v", err)
 	}
-	if first != second {
+	if !reflect.DeepEqual(first, second) {
 		t.Errorf("the same envelope parsed differently by exit code:\n 0 = %+v\n137 = %+v", first, second)
 	}
 }
