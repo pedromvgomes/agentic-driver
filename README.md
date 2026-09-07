@@ -100,14 +100,29 @@ in effect — the concrete name a request that names none would be answered by �
 and is empty when no model has been chosen and the CLI's own default applies.
 
 Where a provider implements `ModelResolver`, a family alias resolves to the
-newest build in that family:
+newest build in that family. Both providers do, and each dialect's aliases are
+its own vendor's family names:
 
-| Alias | claudecode resolves to |
+| claudecode alias | resolves to |
 | --- | --- |
 | `opus` | `claude-opus-5` |
 | `sonnet` | `claude-sonnet-5` |
 | `haiku` | `claude-haiku-4-5` |
 | `fable` | `claude-fable-5-1` |
+
+| codex alias | resolves to |
+| --- | --- |
+| `astra` | `gpt-6-astra` |
+| `sol` | `gpt-5.6-sol` |
+| `terra` | `gpt-5.6-terra` |
+| `luna` | `gpt-5.6-luna` |
+| `mini` | `gpt-5.4-mini` |
+
+There is deliberately no vocabulary shared between the two. A `sonnet` that also
+meant something on codex would have this library assert that one vendor's model
+is the counterpart of another's — an editorial claim it has no standing to make,
+and one that would silently answer a provider swap with a model nobody chose. A
+caller that wants the same model everywhere names it concretely.
 
 Anything else is passed through untouched, so a concrete ID works and so does a
 family newer than this library.
