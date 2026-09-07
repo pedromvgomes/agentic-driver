@@ -20,7 +20,7 @@ func fold(t *testing.T, name string, req agentic.Request) (agentic.Result, bool,
 		t.Fatalf("read the fixture: %v", err)
 	}
 
-	decoder := New().NewDecoder(req)
+	decoder := onPath(t).NewDecoder(req)
 	var events []agentic.Event
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -184,7 +184,7 @@ func TestReconnectionNoticesAreNotEvents(t *testing.T) {
 // decoder reports incomplete, which is what makes the driver call it an outage
 // rather than an empty success.
 func TestAUsageErrorLeavesNoResultToReport(t *testing.T) {
-	decoder := New().NewDecoder(agentic.Request{})
+	decoder := onPath(t).NewDecoder(agentic.Request{})
 	if _, complete := decoder.Result(); complete {
 		t.Error("a decoder that has seen nothing reports a result")
 	}
@@ -203,7 +203,7 @@ func TestAUsageErrorLeavesNoResultToReport(t *testing.T) {
 // Reporting that as a result would answer a run that produced nothing as a
 // successful empty one.
 func TestATruncatedStreamIsNotAResult(t *testing.T) {
-	decoder := New().NewDecoder(agentic.Request{})
+	decoder := onPath(t).NewDecoder(agentic.Request{})
 	for _, line := range []string{
 		`{"type":"thread.started","thread_id":"11111111-1111-4111-8111-111111111111"}`,
 		`{"type":"turn.started"}`,
@@ -220,7 +220,7 @@ func TestATruncatedStreamIsNotAResult(t *testing.T) {
 }
 
 func TestALineThatIsNotJSONEndsTheRun(t *testing.T) {
-	if _, err := New().NewDecoder(agentic.Request{}).Decode([]byte("not json at all")); err == nil {
+	if _, err := onPath(t).NewDecoder(agentic.Request{}).Decode([]byte("not json at all")); err == nil {
 		t.Error("a line that is not JSON decoded without complaint")
 	}
 }
@@ -228,7 +228,7 @@ func TestALineThatIsNotJSONEndsTheRun(t *testing.T) {
 // An event type this package does not model is skipped, not failed: a release
 // adding one is not a reason to break a run that is otherwise working.
 func TestAnUnmodelledEventIsSkipped(t *testing.T) {
-	event, err := New().NewDecoder(agentic.Request{}).Decode([]byte(`{"type":"some.future.event","detail":{}}`))
+	event, err := onPath(t).NewDecoder(agentic.Request{}).Decode([]byte(`{"type":"some.future.event","detail":{}}`))
 	if err != nil {
 		t.Fatalf("an unmodelled event failed the run: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestEachRunGetsItsOwnDecoder(t *testing.T) {
 }
 
 func TestMaxTurnsIsRefusedRatherThanDropped(t *testing.T) {
-	_, err := New().StreamCommand(agentic.Request{Prompt: "hi", MaxTurns: 3})
+	_, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi", MaxTurns: 3})
 
 	if !errors.Is(err, agentic.ErrInvalidRequest) {
 		t.Fatalf("error = %v, want ErrInvalidRequest for a bound codex cannot express", err)

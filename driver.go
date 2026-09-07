@@ -133,8 +133,8 @@ func (d *Driver) resolveBinary() error {
 	if d.binary != "" {
 		return nil
 	}
-	if inst, ok := d.provider.(Installer); ok {
-		d.binary = inst.BinaryPath()
+	if pin, ok := d.provider.(Pinner); ok {
+		d.binary = pin.BinaryPath()
 		if d.binary == "" {
 			return fmt.Errorf("agentic: provider %s vendors a binary but names no path", d.descriptor.ID)
 		}
@@ -201,7 +201,7 @@ func Executable(info os.FileInfo) bool {
 // binary can fetch it; one that found it on PATH cannot, and saying "install it"
 // there would send the caller to a method that does not exist.
 func (d *Driver) installHint() string {
-	if _, ok := d.provider.(Installer); ok {
+	if _, ok := d.provider.(Pinner); ok {
 		return "; call Install"
 	}
 	return ""

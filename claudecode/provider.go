@@ -150,6 +150,17 @@ func (p *dialect) Descriptor() agentic.Descriptor {
 // BinaryPath is the absolute path of the pinned build.
 func (p *Provider) BinaryPath() string { return p.installer.Path(p.version) }
 
+// SigningIdentity names the key every manifest this provider acts on must be
+// signed by.
+//
+// The fingerprint and not a bare "yes": it is the value an operator compares
+// against Anthropic's own published one, and it is the whole content of the
+// claim. Reporting that something was verified without naming the signer would
+// be an assertion nobody can check.
+func (p *Provider) SigningIdentity() string {
+	return "OpenPGP " + SigningKeyFingerprint + " (Anthropic Claude Code Release Signing <security@anthropic.com>)"
+}
+
 // baseArgs are the flags every invocation carries, in the order they must
 // appear.
 //
@@ -466,13 +477,21 @@ var (
 	_ agentic.AgentDefiner  = (*Provider)(nil)
 	_ agentic.Permitter     = (*Provider)(nil)
 	_ agentic.TurnLimiter   = (*Provider)(nil)
-	_ agentic.Installer     = (*Provider)(nil)
+
+	// Both, and the pair is the claim. Pinner says which build runs; Installer
+	// says it was signed by the key SigningIdentity names. A provider that
+	// pinned a version without a signature to check would satisfy only the
+	// first, which is exactly the distinction the two interfaces exist to keep
+	// visible.
+	_ agentic.Pinner    = (*Provider)(nil)
+	_ agentic.Installer = (*Provider)(nil)
 
 	_ agentic.SchemaConstrainer = (*Provider)(nil)
 
-	// The same dialect, minus the one capability that depends on owning the
-	// binary. A PathProvider that gained an Installer would be claiming to
-	// have verified a build it merely found.
+	// The same dialect, minus the two capabilities that depend on owning the
+	// binary. A PathProvider that gained a Pinner would be claiming to have
+	// chosen a build it merely found, and an Installer that it had verified
+	// one.
 	_ agentic.Provider      = (*PathProvider)(nil)
 	_ agentic.Isolator      = (*PathProvider)(nil)
 	_ agentic.ModelResolver = (*PathProvider)(nil)

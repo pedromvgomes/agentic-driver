@@ -41,6 +41,27 @@ func (s *stub) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 
 func (s *stub) NewDecoder(agentic.Request) agentic.Decoder { return &stubDecoder{stub: s} }
 
+// pinningStub vendors a binary at a version it chose, and verifies no signature
+// over it: a Pinner that is not an Installer.
+//
+// It exists because that combination is the one the two interfaces were split to
+// express, and a stub implementing neither would exercise the vendors-nothing
+// path while appearing to test this one.
+type pinningStub struct {
+	stub
+	path string
+}
+
+func (p *pinningStub) BinaryPath() string { return p.path }
+
+func (p *pinningStub) Install(context.Context, string) (agentic.InstallResult, error) {
+	return agentic.InstallResult{Version: "1.0.0", Path: p.path}, nil
+}
+
+func (p *pinningStub) Installed(context.Context) ([]string, error) { return []string{"1.0.0"}, nil }
+
+func (p *pinningStub) Prune(context.Context, int) error { return nil }
+
 // stubDecoder reads either shape a test needs: a line naming an event kind, or
 // a bare Result document standing in for a run that only ever says one thing.
 type stubDecoder struct {
@@ -367,6 +388,50 @@ func TestInstallingIsRefusedByAProviderThatVendorsNothing(t *testing.T) {
 
 	if _, err := d.Install(t.Context(), ""); !errors.Is(err, agentic.ErrInstallUnsupported) {
 		t.Errorf("error = %v, want ErrInstallUnsupported", err)
+	}
+}
+
+// A provider that vendors nothing has no identity to name and nothing to
+// install, and the answer says both: the way out is to vendor, not to go
+// looking for a signature over a binary this driver never chose.
+func TestProvenanceIsRefusedByAProviderThatVendorsNothing(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	_, err := d.SigningIdentity()
+	if !errors.Is(err, agentic.ErrProvenanceUnsupported) {
+		t.Errorf("error = %v, want ErrProvenanceUnsupported", err)
+	}
+	if !errors.Is(err, agentic.ErrInstallUnsupported) {
+		t.Errorf("error = %v, want it to also report that nothing is vendored", err)
+	}
+}
+
+// Pinning and provenance are different claims, and a provider making the first
+// must not be read as making the second. This is the state the two interfaces
+// exist to separate: a binary whose bytes are chosen and whose builder is not
+// confirmed, which must not be confused with vendoring nothing.
+func TestProvenanceIsRefusedByAPinnerThatVerifiesNoSignature(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &pinningStub{}, fake)
+
+	_, err := d.SigningIdentity()
+	if !errors.Is(err, agentic.ErrProvenanceUnsupported) {
+		t.Errorf("error = %v, want ErrProvenanceUnsupported", err)
+	}
+	if errors.Is(err, agentic.ErrInstallUnsupported) {
+		t.Errorf("error = %v, want it not to claim the provider vendors nothing", err)
+	}
+}
+
+// A driver over a Pinner reaches Install rather than refusing it, which is the
+// other half of the same distinction.
+func TestInstallingIsOfferedByAPinnerThatVerifiesNoSignature(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &pinningStub{}, fake)
+
+	if _, err := d.Install(t.Context(), "1.0.0"); errors.Is(err, agentic.ErrInstallUnsupported) {
+		t.Errorf("error = %v, want the install to be attempted", err)
 	}
 }
 

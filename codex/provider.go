@@ -4,8 +4,16 @@
 // implementation is wrong in ways nobody can see from inside that
 // implementation, and `codex exec` is the closest analogue to `claude -p` that
 // is genuinely a different program: different flag spelling, a different
-// credential variable, a different set of variables that can redirect it, and
-// no vendored binary at all.
+// credential variable, a different set of variables that can redirect it, and a
+// vendor whose distribution supports a different guarantee.
+//
+// It vendors its own copy of the CLI at an exact version, checked against a
+// digest committed in this repository, and executes it by absolute path. What
+// it does NOT claim is provenance: OpenAI publishes sigstore bundles for its
+// linux-musl release assets alone, and the npm channel that does carry an
+// attestation for every platform can only be verified with a dependency tree an
+// order of magnitude larger than this library. That attestation is checked by
+// hand when the pin moves; see docs/adr/0004.
 //
 // `codex exec --json` emits JSONL from its first line to its last, and has no
 // envelope mode to fall back to: -o/--output-last-message writes bare text to a
@@ -16,6 +24,7 @@ package codex
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -34,13 +43,14 @@ import (
 // ID is the provider's stable identifier.
 const ID = "codex"
 
-// BinaryName is the executable, found on PATH. Unlike claudecode this package
-// vendors nothing: there is no signed manifest to pin against, so claiming a
-// verified build would be a claim it cannot keep.
+// BinaryName is what the platform package calls the executable, and what a
+// PathProvider looks up on PATH.
 const BinaryName = "codex"
 
-// Provider is the Codex dialect.
-type Provider struct {
+// dialect is everything both providers share: the flags codex takes, the
+// envelope it prints, and the variables that carry or redirect its credential.
+// Which binary runs is the only thing they differ on.
+type dialect struct {
 	// publishing holds one lock per schema file, keyed by its name.
 	//
 	// It saves work and nothing else. Correctness across concurrent runs comes
@@ -52,10 +62,145 @@ type Provider struct {
 	publishing sync.Map
 }
 
-// New builds the provider.
-func New() *Provider { return &Provider{} }
+// Provider runs a vendored Codex, installed at a pinned version whose tarball
+// digest is committed in this package.
+//
+// It implements Pinner, which is also what makes the binary an absolute path:
+// there is no PATH lookup for something else to win and no launcher symlink to
+// repoint, so the build that runs is the build the pin names. It does NOT
+// implement Installer — see the assertions at the foot of this file.
+type Provider struct {
+	dialect
+	installer *Installer
+	version   string
+}
 
-func (p *Provider) Descriptor() agentic.Descriptor {
+// PathProvider runs whichever Codex is on PATH.
+//
+// It deliberately implements neither Pinner nor Installer, and the absence is
+// the point: a provider that runs someone else's binary has not chosen a
+// version and cannot vouch for one, and the driver reads that absence rather
+// than taking anyone's word for it. Use it on a developer machine, where the
+// answer to "which codex" is "the one I already have", and on Windows, where
+// this package vendors nothing.
+type PathProvider struct {
+	dialect
+}
+
+// Option configures either provider.
+type Option func(*config)
+
+type config struct {
+	version    string
+	versionSet bool
+}
+
+// WithVersion overrides the pinned version New installs and runs. It must be a
+// version this package commits digests for, since there would otherwise be
+// nothing to check a download against. It is meaningless to a PathProvider,
+// which runs whatever is on PATH, and NewOnPath refuses it rather than ignoring
+// it.
+func WithVersion(v string) Option {
+	return func(c *config) { c.version, c.versionSet = v, true }
+}
+
+func settings(opts []Option) config {
+	cfg := config{version: PinnedVersion}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+// New builds a provider that installs and runs its own copy of the CLI.
+//
+// providersRoot is where vendored versions live, one directory per version. It
+// must be absolute, because the binary under it is executed by the path this
+// composes.
+//
+// The pinned version does not have to be installed yet: Install is how it gets
+// there, and refusing to construct the provider would put that method out of
+// reach of the object offering it. Driver.Ready reports whether a run could
+// start.
+func New(providersRoot string, opts ...Option) (*Provider, error) {
+	cfg := settings(opts)
+
+	inst, err := NewInstaller(providersRoot)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateVersion(cfg.version); err != nil {
+		return nil, fmt.Errorf("codex: pinned version: %w", err)
+	}
+	// Refused at construction rather than at Install, and refused for THIS
+	// machine rather than for the version in the abstract.
+	//
+	// A version with no committed digest can never be installed, so a provider
+	// configured with one is a driver that will fail every time it is asked to
+	// fetch anything — at the call that needed the binary rather than the call
+	// that chose it. A version pinned for some platforms and not this one fails
+	// identically, so asking whether the version appears at all would move the
+	// wrong half of the question forward.
+	if _, err := PinnedDigest(cfg.version, inst.release.platform); err != nil {
+		return nil, fmt.Errorf("codex: %w", err)
+	}
+
+	return &Provider{installer: inst, version: cfg.version}, nil
+}
+
+// NewOnPath builds a provider that runs whichever codex is on PATH.
+//
+// This is the developer-machine case, and it pairs with ambient credentials:
+// use the CLI that is already installed, already authenticated, already the one
+// being used by hand. What it gives up is the pin — the binary is whatever PATH
+// resolves to, at whatever version it has updated itself to — which is why it is
+// a separate constructor rather than a flag on the other one.
+func NewOnPath(opts ...Option) (*PathProvider, error) {
+	cfg := settings(opts)
+
+	// Refused rather than ignored: a caller pinning a version is asking for a
+	// specific build, and answering that request with "whatever is on PATH"
+	// would be the silent substitution the pin exists to prevent.
+	if cfg.versionSet {
+		return nil, errors.New("codex: WithVersion needs a vendored install; NewOnPath runs whatever is on PATH")
+	}
+
+	return &PathProvider{}, nil
+}
+
+// Version reports the version this provider runs.
+func (p *Provider) Version() string { return p.version }
+
+// BinaryPath is the absolute path of the pinned build.
+func (p *Provider) BinaryPath() string { return p.installer.Path(p.version) }
+
+// Install downloads a version and refuses any bytes but the ones its committed
+// digest names.
+//
+// An empty version means the pin, so "install what you need" is a request a
+// caller can make without knowing the number.
+func (p *Provider) Install(ctx context.Context, version string) (agentic.InstallResult, error) {
+	if version == "" {
+		version = p.version
+	}
+	return p.installer.Install(ctx, version)
+}
+
+// Installed lists the versions present, newest first.
+func (p *Provider) Installed(ctx context.Context) ([]string, error) {
+	return p.installer.Installed(ctx)
+}
+
+// Prune trims old versions, and never the pinned one.
+//
+// The provider supplies that protection rather than the caller, because the
+// provider is what knows which version it is about to execute. A retention
+// policy that could delete it would trade a full disk for a broken install.
+func (p *Provider) Prune(ctx context.Context, keep int) error {
+	return p.installer.Prune(ctx, keep, p.version)
+}
+
+func (p *dialect) Descriptor() agentic.Descriptor {
 	return agentic.Descriptor{
 		ID:          ID,
 		DisplayName: "Codex",
@@ -72,7 +217,7 @@ func (p *Provider) Descriptor() agentic.Descriptor {
 //
 // --json is the only output mode. It is a stream, so there is no second
 // invocation for a batched run to drift away from this one.
-func (p *Provider) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
+func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	if req.Prompt == "" {
 		return agentic.Invocation{}, fmt.Errorf("%w: codex exec needs a prompt", agentic.ErrInvalidRequest)
 	}
@@ -131,7 +276,7 @@ var sandboxModes = []string{"read-only", "workspace-write", "danger-full-access"
 // and never blocks for approval — a sandbox denial comes back as the agent
 // reporting it could not act, on an otherwise successful turn — so setting a
 // policy here would be a knob with no meaning in this mode.
-func (p *Provider) PermissionArgs(mode string, allowedTools []string) ([]string, error) {
+func (p *dialect) PermissionArgs(mode string, allowedTools []string) ([]string, error) {
 	if len(allowedTools) > 0 {
 		return nil, fmt.Errorf("%w: codex has no per-tool allowlist, so %s cannot be granted; restrict the run with a sandbox mode (%s)",
 			agentic.ErrInvalidRequest, strings.Join(allowedTools, ", "), strings.Join(sandboxModes, ", "))
@@ -168,7 +313,7 @@ const schemaDirName = "agentic-codex-schema"
 // anything able to write the directory could have chosen, and a run constrained
 // to a schema nobody asked for still answers, in valid JSON, with nothing to
 // mark it wrong.
-func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
+func (p *dialect) SchemaArgs(schema json.RawMessage) ([]string, error) {
 	sum := sha256.Sum256(schema)
 	// The name carries the whole digest: a truncated one makes two different
 	// schemas collide onto one file, and the run that lost would be constrained
@@ -217,7 +362,7 @@ func (p *Provider) SchemaArgs(schema json.RawMessage) ([]string, error) {
 // to another account, or standing in for something that is not a directory is
 // refused rather than used, because everything downstream treats a file found
 // there as this process's own.
-func (p *Provider) schemaDir() (string, error) {
+func (p *dialect) schemaDir() (string, error) {
 	root, err := schemaRoot()
 	if err != nil {
 		return "", err
@@ -311,7 +456,7 @@ func publish(path string, content []byte) error {
 //
 // A different variable from claudecode's, which is the point of the vocabulary
 // being the provider's: nothing generic could have named it.
-func (p *Provider) AuthEnv(token string) map[string]string {
+func (p *dialect) AuthEnv(token string) map[string]string {
 	return map[string]string{"OPENAI_API_KEY": token}
 }
 
@@ -322,7 +467,7 @@ func (p *Provider) AuthEnv(token string) map[string]string {
 // that makes the list a provider's property rather than the library's. A shared
 // list would have to be the union, and every entry in it would be wrong for
 // somebody.
-func (p *Provider) DenyEnv() []string {
+func (p *dialect) DenyEnv() []string {
 	return []string{
 		"OPENAI_API_KEY",
 		"OPENAI_BASE_URL",
@@ -335,19 +480,37 @@ func (p *Provider) DenyEnv() []string {
 	}
 }
 
-// Compile-time proof of which capabilities this provider claims. It implements
-// neither Installer nor Resumer nor AgentDefiner nor TurnLimiter: absent
-// capabilities are absent from the type, and the driver answers for them
-// without spawning anything.
+// Compile-time proof of which capabilities each provider claims. Neither
+// implements Resumer nor AgentDefiner nor TurnLimiter: absent capabilities are
+// absent from the type, and the driver answers for them without spawning
+// anything.
 //
 // TurnLimiter is absent because codex has no turn bound to express, and
 // AgentDefiner because it has no vocabulary for declaring a roster on the
-// command line. Installer is absent because this package vendors nothing: there
-// is no signed manifest to pin against, so claiming a verified build would be a
-// claim it cannot keep.
+// command line.
+//
+// Installer is absent from BOTH, and that is the one worth reading twice. The
+// vendored Provider is a Pinner: it settles which bytes run, by refusing any
+// tarball but the one whose digest this package commits, which is what keeps
+// parse.go and the fixtures in testdata describing the same CLI. Installer
+// would additionally assert that a named publisher signed those bytes, and that
+// is a claim this package cannot make on every platform it vendors on with the
+// dependencies it is willing to carry. Claiming it anyway — true on linux,
+// hollow on darwin — is worse than not claiming it, because the caller who
+// asserts on Installer to decide whether to trust a build would get the same
+// answer in both cases.
 var (
 	_ agentic.Provider          = (*Provider)(nil)
 	_ agentic.Isolator          = (*Provider)(nil)
 	_ agentic.Permitter         = (*Provider)(nil)
 	_ agentic.SchemaConstrainer = (*Provider)(nil)
+	_ agentic.Pinner            = (*Provider)(nil)
+
+	// The same dialect, minus the capability that depends on owning the binary.
+	// A PathProvider that gained a Pinner would be claiming to have chosen a
+	// build it merely found.
+	_ agentic.Provider          = (*PathProvider)(nil)
+	_ agentic.Isolator          = (*PathProvider)(nil)
+	_ agentic.Permitter         = (*PathProvider)(nil)
+	_ agentic.SchemaConstrainer = (*PathProvider)(nil)
 )

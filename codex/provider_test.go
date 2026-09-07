@@ -13,7 +13,7 @@ import (
 // The prompt is positional and last, so a prompt beginning with a dash cannot
 // be read as a flag.
 func TestThePromptIsTheLastArgument(t *testing.T) {
-	inv, err := New().StreamCommand(agentic.Request{Prompt: "--not-a-flag", Model: "gpt-5"})
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "--not-a-flag", Model: "gpt-5"})
 	if err != nil {
 		t.Fatalf("Command: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestThePromptIsTheLastArgument(t *testing.T) {
 }
 
 func TestCommandRefusesAnEmptyPrompt(t *testing.T) {
-	if _, err := New().StreamCommand(agentic.Request{}); !errors.Is(err, agentic.ErrInvalidRequest) {
+	if _, err := onPath(t).StreamCommand(agentic.Request{}); !errors.Is(err, agentic.ErrInvalidRequest) {
 		t.Errorf("error = %v, want ErrInvalidRequest", err)
 	}
 }
@@ -42,13 +42,13 @@ func TestTheTwoProvidersShareNoCredentialVocabulary(t *testing.T) {
 	}
 
 	claudeAuth := claude.AuthEnv("token")
-	for name := range New().AuthEnv("token") {
+	for name := range onPath(t).AuthEnv("token") {
 		if _, both := claudeAuth[name]; both {
 			t.Errorf("both providers carry their credential in %s, so the variable is not dialect after all", name)
 		}
 	}
 
-	codexDenied := New().DenyEnv()
+	codexDenied := onPath(t).DenyEnv()
 	var shared int
 	for _, name := range claude.DenyEnv() {
 		if slices.Contains(codexDenied, name) {
@@ -64,7 +64,7 @@ func TestTheTwoProvidersShareNoCredentialVocabulary(t *testing.T) {
 // absences are what the driver reads to answer for the capability without
 // spawning a process.
 func TestAbsentCapabilitiesAreAbsentFromTheType(t *testing.T) {
-	var p any = New()
+	var p any = onPath(t)
 
 	if _, ok := p.(agentic.Installer); ok {
 		t.Error("codex implements Installer, but it vendors no signed binary to install")
@@ -85,7 +85,7 @@ func TestAbsentCapabilitiesAreAbsentFromTheType(t *testing.T) {
 // kind — so an allowedTools this accepted could only be discarded, leaving the
 // run with more authority than was asked for.
 func TestAToolAllowlistIsRefusedRatherThanDropped(t *testing.T) {
-	_, err := New().PermissionArgs("", []string{"Bash(git status)"})
+	_, err := onPath(t).PermissionArgs("", []string{"Bash(git status)"})
 
 	if !errors.Is(err, agentic.ErrInvalidRequest) {
 		t.Fatalf("error = %v, want ErrInvalidRequest", err)
@@ -98,7 +98,7 @@ func TestAToolAllowlistIsRefusedRatherThanDropped(t *testing.T) {
 // The refusal has to survive being reached through Command, which is where a
 // driver actually meets it. A request carrying tools must never produce an argv.
 func TestAToolAllowlistNeverProducesAnInvocation(t *testing.T) {
-	inv, err := New().StreamCommand(agentic.Request{Prompt: "hi", AllowedTools: []string{"Read"}})
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi", AllowedTools: []string{"Read"}})
 
 	if err == nil {
 		t.Fatalf("a tool grant produced the invocation %q instead of a refusal", inv.Args)
@@ -110,7 +110,7 @@ func TestAToolAllowlistNeverProducesAnInvocation(t *testing.T) {
 
 func TestASandboxModeBecomesTheSandboxFlag(t *testing.T) {
 	for _, mode := range []string{"read-only", "workspace-write", "danger-full-access"} {
-		args, err := New().PermissionArgs(mode, nil)
+		args, err := onPath(t).PermissionArgs(mode, nil)
 		if err != nil {
 			t.Fatalf("PermissionArgs(%q): %v", mode, err)
 		}
@@ -124,7 +124,7 @@ func TestASandboxModeBecomesTheSandboxFlag(t *testing.T) {
 // reaches a caller as an outage — a typo wearing the costume of a failing
 // provider, and one that invites a retry loop. Refusing here names the problem.
 func TestAnUnknownSandboxModeIsRefusedBeforeSpawning(t *testing.T) {
-	_, err := New().PermissionArgs("acceptEdits", nil)
+	_, err := onPath(t).PermissionArgs("acceptEdits", nil)
 
 	if !errors.Is(err, agentic.ErrInvalidRequest) {
 		t.Fatalf("error = %v, want ErrInvalidRequest for another CLI's vocabulary", err)
@@ -136,7 +136,7 @@ func TestAnUnknownSandboxModeIsRefusedBeforeSpawning(t *testing.T) {
 
 // An empty mode is the CLI's own default, not a mode to validate.
 func TestNoPermissionModeAddsNoFlags(t *testing.T) {
-	args, err := New().PermissionArgs("", nil)
+	args, err := onPath(t).PermissionArgs("", nil)
 	if err != nil {
 		t.Fatalf("PermissionArgs: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestNoPermissionModeAddsNoFlags(t *testing.T) {
 // never blocks for approval, so setting one would be a knob with no meaning in
 // this mode.
 func TestTheInvocationDoesNotSetAnApprovalPolicy(t *testing.T) {
-	inv, err := New().StreamCommand(agentic.Request{Prompt: "hi", PermissionMode: "read-only"})
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi", PermissionMode: "read-only"})
 	if err != nil {
 		t.Fatalf("StreamCommand: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestTheInvocationDoesNotSetAnApprovalPolicy(t *testing.T) {
 // The turn bound codex accepts and ignores. Emitting it would leave the loop
 // running unbounded while the caller believed it had capped it.
 func TestNoInvocationCarriesAFabricatedTurnBound(t *testing.T) {
-	inv, err := New().StreamCommand(agentic.Request{Prompt: "hi"})
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi"})
 	if err != nil {
 		t.Fatalf("StreamCommand: %v", err)
 	}
