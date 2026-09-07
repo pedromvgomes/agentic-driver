@@ -175,13 +175,43 @@ func unreadable(stdout, stderr []byte, code int) error {
 type streamEvent struct {
 	Type    string `json:"type"`
 	Message struct {
-		Content []struct {
-			Type    string          `json:"type"`
-			Text    string          `json:"text"`
-			Name    string          `json:"name"`
-			Content json.RawMessage `json:"content"`
-		} `json:"content"`
+		Content messageContent `json:"content"`
 	} `json:"message"`
+}
+
+// contentBlock is one entry of a message's block list.
+type contentBlock struct {
+	Type    string          `json:"type"`
+	Text    string          `json:"text"`
+	Name    string          `json:"name"`
+	Content json.RawMessage `json:"content"`
+}
+
+// messageContent is a message's `content`, which carries the same
+// string-or-blocks polymorphism a tool result's content does, one level up.
+//
+// Modelling only the block list is what makes a working stream look like a
+// transport failure: a bare string is a shape the CLI emits, so refusing it
+// fails the whole run over a line the caller would have skipped, and the
+// refusal surfaces as the provider being unavailable.
+type messageContent struct {
+	// Blocks is the list form, empty when the content was a bare string.
+	Blocks []contentBlock
+	// Text is the string form, empty when the content was a list.
+	Text string
+}
+
+// UnmarshalJSON accepts either shape, and neither: a null content leaves both
+// fields zero rather than failing a line that carries no message body.
+func (c *messageContent) UnmarshalJSON(raw []byte) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		return json.Unmarshal(trimmed, &c.Text)
+	}
+	return json.Unmarshal(trimmed, &c.Blocks)
 }
 
 // NewDecoder returns a decoder for one run.
@@ -270,7 +300,7 @@ func (d *decoder) Result() (agentic.Result, bool) { return d.result, d.complete 
 // undecoded line is carried. Thinking blocks match nothing here and are
 // skipped — they are the agent's reasoning, not its output.
 func (p *dialect) assistantEvent(ev streamEvent, line []byte) agentic.Event {
-	for _, block := range ev.Message.Content {
+	for _, block := range ev.Message.Content.Blocks {
 		switch block.Type {
 		case "text":
 			if block.Text != "" {
@@ -280,12 +310,21 @@ func (p *dialect) assistantEvent(ev streamEvent, line []byte) agentic.Event {
 			return agentic.Event{Kind: agentic.EventKindToolUse, Text: block.Name, Raw: clone(line)}
 		}
 	}
+	// The string form of an assistant message is the answer itself, so it
+	// reaches the caller as text rather than being dropped the way an
+	// unmodelled line is.
+	if ev.Message.Content.Text != "" {
+		return agentic.Event{Kind: agentic.EventKindText, Text: ev.Message.Content.Text, Raw: clone(line)}
+	}
 	return agentic.Event{}
 }
 
 // userEvent renders a tool answering the agent.
+//
+// A string user message is the prompt echoed rather than a tool answering, so
+// it yields nothing: a caller watching tools work has nothing to show for it.
 func (p *dialect) userEvent(ev streamEvent, line []byte) agentic.Event {
-	for _, block := range ev.Message.Content {
+	for _, block := range ev.Message.Content.Blocks {
 		if block.Type == "tool_result" {
 			return agentic.Event{
 				Kind: agentic.EventKindToolResult,
