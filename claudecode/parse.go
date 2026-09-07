@@ -241,12 +241,32 @@ type decoder struct {
 // an init banner — that a caller consuming text has no use for, and a release
 // adding another one is not a reason to fail a run that is working.
 func (d *decoder) Decode(line []byte) (agentic.Event, error) {
-	var ev streamEvent
-	if err := json.Unmarshal(line, &ev); err != nil {
+	// The type is read on its own, from a shape that cannot fail on anything
+	// else the line carries. Decoding the whole event first would make every
+	// field's shape load-bearing on every line, including the ones nothing
+	// here reads: a bookkeeping event whose `message` is a string rather than
+	// an object would fail the run, and the tolerance below would never be
+	// reached to skip it.
+	var head struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(line, &head); err != nil {
 		return agentic.Event{}, err
 	}
 
-	switch ev.Type {
+	var ev streamEvent
+	switch head.Type {
+	case "assistant", "user":
+		if err := json.Unmarshal(line, &ev); err != nil {
+			// Skipped rather than fatal. These events drive progress display,
+			// while the run's outcome comes off the terminal line, so a shape
+			// this package cannot read costs a caller one tool call it was
+			// going to watch — not the result it was waiting for.
+			return agentic.Event{}, nil
+		}
+	}
+
+	switch head.Type {
 	case "assistant":
 		return d.assistantEvent(ev, line), nil
 

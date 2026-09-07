@@ -275,3 +275,57 @@ func TestBlockContentStillDecodes(t *testing.T) {
 		t.Errorf("Text = %q, want the tool output", event.Text)
 	}
 }
+
+// The tolerance for a line this package does not model has to survive the
+// line's own shape. Decoding the whole event before reading its type makes
+// every field's shape load-bearing on every line, including the ones nothing
+// here reads — so a bookkeeping event the CLI adds later fails a run that is
+// working, and reports it as the provider being unavailable.
+func TestAnUnmodelledLineCannotFailTheRunWhateverItsShape(t *testing.T) {
+	p := testProvider(t)
+
+	for name, line := range map[string]string{
+		"string message":  `{"type":"system","subtype":"compact_boundary","message":"context compacted"}`,
+		"numeric message": `{"type":"rate_limit_event","message":42}`,
+		"array message":   `{"type":"system","message":["a","b"]}`,
+		"nested content":  `{"type":"summary","message":{"content":{"blocks":[]}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			event, err := p.NewDecoder(agentic.Request{}).Decode([]byte(line))
+			if err != nil {
+				t.Fatalf("Decode(%s): %v", line, err)
+			}
+			if event.Kind != agentic.EventKindUnknown {
+				t.Errorf("Kind = %v, want the zero event for a line this package does not model", event.Kind)
+			}
+		})
+	}
+}
+
+// A modelled line whose shape is unreadable is skipped rather than fatal. The
+// event stream drives progress display; the run's outcome comes off the
+// terminal line, so losing one tool call a caller was going to watch is not
+// worth failing a run that produced a result.
+func TestAModelledLineWithAnUnreadableShapeIsSkipped(t *testing.T) {
+	p := testProvider(t)
+
+	event, err := p.NewDecoder(agentic.Request{}).Decode(
+		[]byte(`{"type":"user","message":"resuming from a summary"}`))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if event.Kind != agentic.EventKindUnknown {
+		t.Errorf("Kind = %v, want the zero event", event.Kind)
+	}
+}
+
+// The terminal line is the run's outcome rather than progress, so an
+// unreadable one is still an error: reporting success off a result nobody
+// could parse would invent a verdict.
+func TestAnUnreadableResultLineIsStillAnError(t *testing.T) {
+	p := testProvider(t)
+
+	if _, err := p.NewDecoder(agentic.Request{}).Decode([]byte(`{"type":"result","subtype":[]}`)); err == nil {
+		t.Error("an unreadable result line was accepted")
+	}
+}
