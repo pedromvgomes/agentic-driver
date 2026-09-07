@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,11 +13,19 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/mod/semver"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
+
+// stagingLifetime is how long a staging directory may sit untouched before it is
+// taken to belong to a process that is gone.
+//
+// Comfortably longer than the download client's own 30-minute timeout, so a slow
+// but live install is never mistaken for abandoned debris.
+const stagingLifetime = 24 * time.Hour
 
 // DefaultRetention is how many installed versions to keep.
 //
@@ -38,8 +47,10 @@ const DefaultRetention = 2
 // executes the helpers beside it and a directory holding only `codex` is a
 // version that runs and then fails at its first search.
 //
-// A version is either completely present or absent — never half-written — which
-// is what lets Installed() simply list directories.
+// A PUBLISHED version tree is complete, because it is published by renaming a
+// tree that is already extracted and digest-checked. An install interrupted
+// before that rename can still leave a version-shaped directory behind, which is
+// why Installed() filters on a runnable binary rather than trusting the name.
 type Installer struct {
 	root string
 	// staging is a sibling of root, deliberately outside the directory
@@ -343,6 +354,15 @@ func (i *Installer) installOnce(ctx context.Context, version string) (agentic.In
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
 
+	// Staging trees old enough that no live install could own one are reclaimed.
+	//
+	// The deferred cleanup above covers every path this function can return by,
+	// but not a process killed between the two — and what it leaves is a partly
+	// extracted tree of up to a few hundred megabytes that no later call would
+	// ever look at again. Retention exists to bound exactly that, and it walks
+	// the version root, which this directory deliberately sits outside of.
+	i.sweepStaging()
+
 	// The archive lands on disk before anything is expanded from it. It is
 	// removed with the staging directory whatever happens, so an unverified
 	// tarball is never left where a later install could mistake it for work
@@ -367,7 +387,7 @@ func (i *Installer) installOnce(ctx context.Context, version string) (agentic.In
 	if err := extract(archive, tree); err != nil {
 		return agentic.InstallResult{}, err
 	}
-	if err := syncDir(tree); err != nil {
+	if err := syncTree(tree); err != nil {
 		return agentic.InstallResult{}, err
 	}
 
@@ -382,12 +402,13 @@ func (i *Installer) installOnce(ctx context.Context, version string) (agentic.In
 		// another process won the race and its copy was checked against the
 		// same digest.
 		//
-		// If it is NOT — an empty directory left by an interrupted install, say
-		// — then reporting success would be a lie: the verified tree is about to
-		// be discarded by the deferred cleanup, and Path() would point at a file
-		// that does not exist. Every later attempt would repeat it, so the
-		// caller would be permanently stuck with a "present" version it cannot
-		// execute.
+		// If it is NOT — a torn directory holding no runnable binary, which is
+		// what reaches this branch, since renaming onto an EMPTY directory
+		// succeeds and never lands here — then reporting success would be a lie:
+		// the verified tree is about to be discarded by the deferred cleanup,
+		// and Path() would point at a file that does not exist. Every later
+		// attempt would repeat it, so the caller would be permanently stuck with
+		// a "present" version it cannot execute.
 		if usable(target) {
 			return agentic.InstallResult{Version: version, Path: target, AlreadyPresent: true}, nil
 		}
@@ -434,6 +455,65 @@ func (i *Installer) prepare(dir string) error {
 		return fmt.Errorf("%s is open to other users (mode %#o)", dir, info.Mode().Perm())
 	}
 	return nil
+}
+
+// syncTree flushes every directory in a staged tree, deepest first.
+//
+// Syncing the tree's root alone is not enough. The root's entry names `bin`,
+// but the entry inside `bin` naming the executable lives in a directory of its
+// own, and a power cut can make the publishing rename durable while that inner
+// entry is not — publishing a version whose binary does not exist, which the
+// collision branch of installOnce then refuses to repair.
+//
+// The files themselves are flushed as they are written. This is the other half:
+// contents by writeFile, names by this.
+func syncTree(root string) error {
+	var dirs []string
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			dirs = append(dirs, path)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("walk %s: %w", root, err)
+	}
+
+	// Deepest first, so a directory's entries are durable before the entry
+	// naming that directory is.
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := syncDir(dirs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sweepStaging removes staging trees abandoned by a process that died.
+//
+// Age is the test, and it is the only safe one available. Concurrent installs
+// of different versions each hold their own staging directory, in this process
+// and in any other sharing the providers root, so "everything except mine" would
+// delete a tree another install is extracting into right now. A directory
+// untouched for longer than any download could possibly take belongs to nobody.
+//
+// Failure is deliberately silent throughout: reclaiming disk is not what the
+// caller asked for, and a leftover this cannot remove is not a reason to fail an
+// install that is otherwise fine.
+func (i *Installer) sweepStaging() {
+	entries, err := os.ReadDir(i.staging)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil || time.Since(info.ModTime()) < stagingLifetime {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(i.staging, entry.Name()))
+	}
 }
 
 // syncDir flushes a directory entry, so a rename survives a power cut.

@@ -43,15 +43,20 @@ func (d *Driver) Prune(ctx context.Context, keep int) error {
 // SigningIdentity names the trust anchor this provider's binary was verified
 // against.
 //
-// It answers ErrProvenanceUnsupported for a provider that pins a version
-// without checking a publisher's signature over it. That is a real and
-// different state from vendoring nothing at all, and a caller auditing what it
-// runs needs to be able to tell the two apart: one runs bytes nobody vouched
-// for at a version nobody chose, the other runs bytes whose digest is committed
-// but whose builder this library did not confirm.
+// The two ways of not having one are answered differently, because a caller
+// auditing what it runs acts on them differently. A provider that vendors
+// nothing answers ErrInstallUnsupported: it runs bytes nobody vouched for, at a
+// version nobody chose, and the way out is to vendor. A provider that pins
+// without checking a publisher's signature answers ErrProvenanceUnsupported:
+// its bytes match a committed digest, and only their builder is unconfirmed.
+// Both wrap ErrProvenanceUnsupported, so a caller that only wants to know
+// whether an identity exists still matches one sentinel.
 func (d *Driver) SigningIdentity() (string, error) {
 	inst, ok := d.provider.(Installer)
 	if !ok {
+		if _, pins := d.provider.(Pinner); !pins {
+			return "", fmt.Errorf("%w: %w: %s", ErrProvenanceUnsupported, ErrInstallUnsupported, d.descriptor.ID)
+		}
 		return "", fmt.Errorf("%w: %s", ErrProvenanceUnsupported, d.descriptor.ID)
 	}
 	return inst.SigningIdentity(), nil

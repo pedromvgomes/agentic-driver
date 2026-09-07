@@ -132,13 +132,17 @@ func New(providersRoot string, opts ...Option) (*Provider, error) {
 	if err := validateVersion(cfg.version); err != nil {
 		return nil, fmt.Errorf("codex: pinned version: %w", err)
 	}
-	// Refused at construction rather than at Install. A version with no
-	// committed digest can never be installed, so a provider configured with
-	// one is a driver that will fail every time it is asked to fetch anything —
-	// and it would fail at the call that needed the binary rather than at the
-	// call that chose it.
-	if _, ok := pinnedDigests[cfg.version]; !ok {
-		return nil, fmt.Errorf("codex: %w: %s", ErrUnpinnedVersion, cfg.version)
+	// Refused at construction rather than at Install, and refused for THIS
+	// machine rather than for the version in the abstract.
+	//
+	// A version with no committed digest can never be installed, so a provider
+	// configured with one is a driver that will fail every time it is asked to
+	// fetch anything — at the call that needed the binary rather than the call
+	// that chose it. A version pinned for some platforms and not this one fails
+	// identically, so asking whether the version appears at all would move the
+	// wrong half of the question forward.
+	if _, err := PinnedDigest(cfg.version, inst.release.platform); err != nil {
+		return nil, fmt.Errorf("codex: %w", err)
 	}
 
 	return &Provider{installer: inst, version: cfg.version}, nil

@@ -14,8 +14,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
@@ -36,6 +38,9 @@ type entry struct {
 	// triple overrides the archive's vendor directory for this entry alone, so
 	// a test can build the one shape a real package never has.
 	triple string
+	// outside places the entry beside the vendor tree rather than inside it,
+	// where the npm wrapper keeps its own files.
+	outside bool
 }
 
 // packageTarball builds a gzipped tar shaped like an npm Codex platform
@@ -59,8 +64,12 @@ func packageTarball(t *testing.T, triple string, entries ...entry) []byte {
 		if e.triple != "" {
 			dir = e.triple
 		}
+		name := vendorPrefix + dir + "/" + e.name
+		if e.outside {
+			name = "package/" + e.name
+		}
 		header := &tar.Header{
-			Name:     vendorPrefix + dir + "/" + e.name,
+			Name:     name,
 			Mode:     int64(mode),
 			Size:     int64(len(e.body)),
 			Typeflag: typ,
@@ -139,6 +148,25 @@ func serve(t *testing.T, version string, body []byte) registry {
 			return
 		}
 		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+
+	return registry{url: server.URL, requests: &requests}
+}
+
+// serveHandler stands up a registry with handler-level control, for the
+// failures a well-behaved server never produces.
+func serveHandler(t *testing.T, handler http.HandlerFunc) registry {
+	t.Helper()
+
+	if _, err := PlatformKey(runtime.GOOS, runtime.GOARCH); err != nil {
+		t.Skipf("this platform vendors no Codex build: %v", err)
+	}
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		handler(w, r)
 	}))
 	t.Cleanup(server.Close)
 
@@ -375,5 +403,256 @@ func stage(t *testing.T, inst *Installer, version string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, BinaryName), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatalf("stage %s: %v", version, err)
+	}
+}
+
+// Installed() answers "what can I run", so a name that is not a version, a
+// directory the package hides from enumeration, and a version whose binary
+// cannot be executed are all absent from it. Reporting any of them hands the
+// driver a path it would fail to exec at the start of a run.
+func TestInstalledReportsOnlyRunnableVersions(t *testing.T) {
+	inst := installer(t, serve(t, "9.9.9", nil))
+	stage(t, inst, "0.2.0")
+
+	// A file where only directories are versions.
+	if err := os.WriteFile(filepath.Join(inst.root, "notes.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("prepare the stray file: %v", err)
+	}
+
+	// A staging leftover from an older layout, a name that is not a version,
+	// and a version directory whose binary never became executable.
+	for _, dir := range []string{".9.9.9-staging", "latest", "0.3.0/bin"} {
+		if err := os.MkdirAll(filepath.Join(inst.root, dir), 0o700); err != nil {
+			t.Fatalf("prepare %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(inst.root, "0.3.0", "bin", BinaryName), []byte("x"), 0o600); err != nil {
+		t.Fatalf("prepare the unusable binary: %v", err)
+	}
+
+	installed, err := inst.Installed(t.Context())
+	if err != nil {
+		t.Fatalf("Installed: %v", err)
+	}
+	if len(installed) != 1 || installed[0] != "0.2.0" {
+		t.Errorf("Installed() = %v, want [0.2.0]", installed)
+	}
+}
+
+// Prune reclaims disk, so it sweeps every version-shaped directory rather than
+// the runnable ones Installed() reports. A directory whose binary is missing is
+// invisible to Installed(), so pruning that list would leave it on the disk
+// forever — and leave the rename that would republish that version failing.
+func TestPruneRemovesDebrisInstalledNeverLists(t *testing.T) {
+	inst := installer(t, serve(t, "9.9.9", nil))
+	stage(t, inst, "0.4.0")
+
+	debris := filepath.Join(inst.root, "0.1.0", "bin")
+	if err := os.MkdirAll(debris, 0o700); err != nil {
+		t.Fatalf("prepare the debris: %v", err)
+	}
+
+	if installed, _ := inst.Installed(t.Context()); len(installed) != 1 {
+		t.Fatalf("Installed() = %v, want only the runnable version", installed)
+	}
+	if err := inst.Prune(t.Context(), 1, "0.4.0"); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(inst.root, "0.1.0")); !os.IsNotExist(err) {
+		t.Errorf("the debris directory survived Prune: %v", err)
+	}
+}
+
+// Another process publishing the same version first is a race the install
+// joins rather than fails: its copy was checked against the same digest, so the
+// version is present and correct however it got there.
+func TestAVersionPublishedByAnotherProcessMidInstallIsAccepted(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+
+	var inst *Installer
+	reg := serveHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		// Published while this download is in flight, so the fast path at the
+		// top of installOnce cannot have seen it and the rename is what
+		// collides.
+		stage(t, inst, "9.9.9")
+		_, _ = w.Write(body)
+	})
+	inst = installer(t, reg)
+
+	result, err := inst.Install(t.Context(), "9.9.9")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !result.AlreadyPresent {
+		t.Errorf("Install reported %+v, want the winner's copy accepted as already present", result)
+	}
+}
+
+// A torn directory holding no runnable binary cannot be published over, and
+// saying so names the one thing that fixes it. Reporting success would point
+// Path() at a file that does not exist, and every later attempt would repeat
+// it — a version permanently "present" and permanently unrunnable.
+func TestATornDirectoryBlocksTheInstallAndSaysSo(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+	inst := installer(t, serve(t, "9.9.9", body))
+
+	torn := filepath.Join(inst.root, "9.9.9", "codex-path")
+	if err := os.MkdirAll(torn, 0o700); err != nil {
+		t.Fatalf("prepare the torn directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(torn, "rg"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("prepare the torn directory: %v", err)
+	}
+
+	_, err := inst.Install(t.Context(), "9.9.9")
+	if err == nil {
+		t.Fatal("Install published over a directory holding no usable binary")
+	}
+	if !strings.Contains(err.Error(), "remove it and retry") {
+		t.Errorf("Install error = %v, want it to name the way out", err)
+	}
+}
+
+// A caller that gives up is not a caller that cancels everyone else's install.
+// The download belongs to the set of callers waiting on it, so it survives one
+// of them leaving and stops only when the last one does.
+func TestACallerGivingUpLeavesTheOthersInstalling(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+
+	release := make(chan struct{})
+	arrived := make(chan struct{})
+	var once sync.Once
+	reg := serveHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(arrived) })
+		select {
+		case <-release:
+			_, _ = w.Write(body)
+		case <-r.Context().Done():
+		}
+	})
+	inst := installer(t, reg)
+
+	stayed := make(chan error, 1)
+	go func() {
+		_, err := inst.Install(context.Background(), "9.9.9")
+		stayed <- err
+	}()
+	<-arrived
+
+	// The second caller joins the download already in flight, then gives up.
+	left := make(chan error, 1)
+	giveUp, cancel := context.WithCancel(context.Background())
+	go func() {
+		_, err := inst.Install(giveUp, "9.9.9")
+		left <- err
+	}()
+	cancel()
+
+	if err := <-left; !errors.Is(err, context.Canceled) {
+		t.Errorf("the departing caller got %v, want context.Canceled", err)
+	}
+
+	close(release)
+	if err := <-stayed; err != nil {
+		t.Fatalf("the caller that stayed got %v, want the install to complete", err)
+	}
+	if !usable(inst.Path("9.9.9")) {
+		t.Error("the install did not publish a runnable binary")
+	}
+}
+
+// The last caller leaving stops the download rather than leaving it running for
+// nobody, which is what keeps a detached context bounded.
+func TestTheLastCallerLeavingStopsTheDownload(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+
+	arrived := make(chan struct{})
+	stopped := make(chan struct{})
+	var once sync.Once
+	reg := serveHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(arrived) })
+		<-r.Context().Done()
+		close(stopped)
+	})
+	inst := installer(t, reg)
+
+	giveUp, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := inst.Install(giveUp, "9.9.9")
+		done <- err
+	}()
+	<-arrived
+	cancel()
+
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("Install error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Error("the download outlived the last caller waiting on it")
+	}
+}
+
+// A registry that answers with anything but the tarball has made no statement
+// about the pinned bytes, so the status reaches the caller rather than being
+// folded into a digest mismatch.
+func TestARegistryErrorIsReportedAsItself(t *testing.T) {
+	pin(t, "9.9.9", integrity(wellFormed(t)))
+	inst := installer(t, serveHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream is unwell", http.StatusInternalServerError)
+	}))
+
+	_, err := inst.Install(t.Context(), "9.9.9")
+	if err == nil {
+		t.Fatal("Install accepted a 500 from the registry")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("Install error = %v, want it to name the status", err)
+	}
+	if installed, _ := inst.Installed(t.Context()); len(installed) != 0 {
+		t.Errorf("Installed() = %v after a failed fetch, want none", installed)
+	}
+}
+
+// A real package carries explicit directory entries, a bare entry for the
+// triple itself, and the npm wrapper's own files beside the vendor tree. All
+// three are ordinary parts of the archive: refusing any would make every
+// genuine install fail, and installing the wrapper's files would put documents
+// describing the packaging where the CLI is meant to be.
+func TestExplicitDirectoryEntriesAreInstalled(t *testing.T) {
+	body := packageTarball(t, testTriple,
+		entry{name: "", typ: tar.TypeDir},
+		entry{name: "bin", typ: tar.TypeDir},
+		entry{name: "bin/" + BinaryName, body: "#!/bin/sh\n", mode: 0o755},
+		entry{name: "codex-resources/zsh/bin", typ: tar.TypeDir},
+		entry{name: "codex-resources/zsh/bin/zsh", body: "shell", mode: 0o755},
+		// Siblings of the vendor tree rather than entries within it.
+		entry{name: "package.json", body: `{"name":"@openai/codex"}`, outside: true},
+		entry{name: "README.md", body: "# codex", outside: true},
+	)
+	pin(t, "9.9.9", integrity(body))
+	inst := installer(t, serve(t, "9.9.9", body))
+
+	result, err := inst.Install(t.Context(), "9.9.9")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if !usable(result.Path) {
+		t.Errorf("%s is not runnable after a successful install", result.Path)
+	}
+	nested := filepath.Join(inst.root, "9.9.9", "codex-resources", "zsh", "bin", "zsh")
+	if _, err := os.Stat(nested); err != nil {
+		t.Errorf("the nested helper was not installed: %v", err)
+	}
+	for _, wrapper := range []string{"package.json", "README.md"} {
+		if _, err := os.Stat(filepath.Join(inst.root, "9.9.9", wrapper)); !os.IsNotExist(err) {
+			t.Errorf("the npm wrapper's %s was installed into the version tree", wrapper)
+		}
 	}
 }

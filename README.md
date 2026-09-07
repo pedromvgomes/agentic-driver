@@ -67,8 +67,9 @@ Those are two guarantees, not one, and they are two interfaces:
   [ADR 0004](docs/adr/0004-pinning-and-provenance-are-separate-capabilities.md).
 
 `Driver.SigningIdentity()` answers `ErrProvenanceUnsupported` for a provider
-that pins without verifying a signature, which is a different state from
-vendoring nothing at all.
+that pins without verifying a signature, and wraps `ErrInstallUnsupported`
+alongside it for one that vendors nothing at all — a different state, acted on
+differently, and distinguishable from the one call.
 
 A vendoring provider is constructed before its binary exists, because `Install`
 is how it gets there. `Driver.Ready()` reports whether a run could actually

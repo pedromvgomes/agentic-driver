@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -93,5 +94,34 @@ func TestTheVendoredBinaryIsNamedByAnAbsolutePath(t *testing.T) {
 	segments := strings.Split(filepath.ToSlash(path), "/")
 	if !slices.Contains(segments, PinnedVersion) {
 		t.Errorf("BinaryPath() = %q, want it to name the pinned version %s", path, PinnedVersion)
+	}
+}
+
+// The provider's own retention protects the version it is about to execute,
+// which is the reason that protection lives here rather than with the caller: a
+// caller passing a keep count cannot know which build the driver would run.
+func TestTheProviderProtectsItsPinFromItsOwnRetention(t *testing.T) {
+	p := vendored(t)
+
+	for _, v := range []string{"0.1.0", "0.2.0", PinnedVersion} {
+		dir := filepath.Join(p.installer.root, v, "bin")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("stage %s: %v", v, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, BinaryName), []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatalf("stage %s: %v", v, err)
+		}
+	}
+
+	if err := p.Prune(t.Context(), 1); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	installed, err := p.Installed(t.Context())
+	if err != nil {
+		t.Fatalf("Installed: %v", err)
+	}
+	if !slices.Contains(installed, PinnedVersion) {
+		t.Errorf("Installed() = %v, want it to still hold the pinned %s", installed, PinnedVersion)
 	}
 }
