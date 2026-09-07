@@ -23,18 +23,15 @@ import (
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
 
-// workspace is a git repository, because codex refuses to run anywhere else:
-// "Not inside a trusted directory and --skip-git-repo-check was not specified".
-// The provider does not pass that flag, so the guard stays where the CLI put
-// it, and a caller wanting to run outside a repository has to say so itself.
+// workspace is the directory these runs happen in, and it is an ordinary
+// temporary one. That it needs no git repository is the end-to-end proof that
+// every invocation carries --skip-git-repo-check: without the flag the CLI
+// refuses to start here at all, with "Not inside a trusted directory and
+// --skip-git-repo-check was not specified".
 func workspace(t *testing.T) string {
 	t.Helper()
 
-	dir := t.TempDir()
-	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
-		t.Skipf("cannot make a git repository to run in: %v: %s", err, out)
-	}
-	return dir
+	return t.TempDir()
 }
 
 func integrationDriver(t *testing.T) *agentic.Driver {

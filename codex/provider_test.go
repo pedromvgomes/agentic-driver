@@ -1,12 +1,16 @@
 package codex
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
+	"github.com/pedromvgomes/agentic-driver/agentictest"
 	"github.com/pedromvgomes/agentic-driver/claudecode"
 )
 
@@ -173,5 +177,84 @@ func TestNoInvocationCarriesAFabricatedTurnBound(t *testing.T) {
 		if strings.Contains(arg, "max_turns") {
 			t.Errorf("argv = %q, want no turn bound codex would silently ignore", inv.Args)
 		}
+	}
+}
+
+// skipGitRepoCheck is the flag that lets a scripted run happen wherever it is
+// pointed. Named once so a test cannot pass by asserting on its own typo.
+const skipGitRepoCheck = "--skip-git-repo-check"
+
+// recordedArgs runs one request through a fake binary and reports the argv the
+// child was actually given. Asserting on StreamCommand alone would test what
+// the dialect asks for; this tests what the driver spawns.
+func recordedArgs(t *testing.T, req agentic.Request) []string {
+	t.Helper()
+
+	stream, err := os.ReadFile(filepath.Join("testdata", "success-mini.ndjson"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	fake := (&agentictest.Fake{Stdout: string(stream)}).Build(t)
+
+	d, err := agentic.New(onPath(t), agentic.WithBinary(fake.Path()))
+	if err != nil {
+		t.Fatalf("agentic.New: %v", err)
+	}
+	if _, err := d.Run(t.Context(), req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	return fake.Recorded(t).Args
+}
+
+// Without the flag codex refuses to start outside a git repository, and a
+// scripted run has nobody to warn. It is on every invocation rather than
+// conditional on anything a caller sets, so the same Request that succeeds on
+// claudecode — which has no equivalent check — does not die at spawn here.
+func TestEveryExecInvocationSkipsTheGitRepositoryCheck(t *testing.T) {
+	requests := map[string]agentic.Request{
+		"a bare prompt":  {Prompt: "hi"},
+		"a model":        {Prompt: "hi", Model: "gpt-5.6-sol"},
+		"a sandbox mode": {Prompt: "hi", PermissionMode: "read-only"},
+		"a schema":       {Prompt: "hi", Schema: json.RawMessage(`{"type":"object"}`)},
+	}
+
+	for name, req := range requests {
+		t.Run(name, func(t *testing.T) {
+			inv, err := onPath(t).StreamCommand(req)
+			if err != nil {
+				t.Fatalf("StreamCommand: %v", err)
+			}
+			if !slices.Contains(inv.Args, skipGitRepoCheck) {
+				t.Errorf("argv = %q, want %s", inv.Args, skipGitRepoCheck)
+			}
+		})
+	}
+}
+
+// The child is what actually runs, so the flag has to survive the driver as
+// well as the dialect.
+func TestTheSpawnedChildIsGivenTheGitRepositoryCheckFlag(t *testing.T) {
+	args := recordedArgs(t, agentic.Request{Prompt: "hi"})
+
+	if !slices.Contains(args, skipGitRepoCheck) {
+		t.Errorf("the child was run as %q, want %s", args, skipGitRepoCheck)
+	}
+}
+
+// Every flag stands ahead of the positional prompt, so nothing the prompt
+// contains can be read as one — including a prompt that is spelled exactly like
+// the flag.
+func TestTheGitRepositoryCheckFlagStandsAheadOfThePrompt(t *testing.T) {
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: skipGitRepoCheck})
+	if err != nil {
+		t.Fatalf("StreamCommand: %v", err)
+	}
+
+	last := len(inv.Args) - 1
+	if inv.Args[last] != skipGitRepoCheck {
+		t.Fatalf("last argument = %q, want the prompt", inv.Args[last])
+	}
+	if !slices.Contains(inv.Args[:last], skipGitRepoCheck) {
+		t.Errorf("argv = %q, want the flag ahead of the prompt", inv.Args)
 	}
 }

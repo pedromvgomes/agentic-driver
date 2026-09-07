@@ -248,6 +248,15 @@ func (p *dialect) Descriptor() agentic.Descriptor {
 //
 // --json is the only output mode. It is a stream, so there is no second
 // invocation for a batched run to drift away from this one.
+//
+// --skip-git-repo-check is on every invocation, the way claudecode opens every
+// argv with --setting-sources "". Without it codex refuses to start anywhere
+// but a git repository — "Not inside a trusted directory and
+// --skip-git-repo-check was not specified" — which is a guardrail for a human
+// who may have opened the CLI in the wrong directory. `codex exec` has nobody
+// to warn, and where a scripted child runs is the caller's deliberate choice;
+// leaving the guard in place would mean the same Request succeeds on
+// claudecode, which has no equivalent check, and dies at spawn here.
 func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	if req.Prompt == "" {
 		return agentic.Invocation{}, fmt.Errorf("%w: codex exec needs a prompt", agentic.ErrInvalidRequest)
@@ -261,7 +270,7 @@ func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error)
 			"%w: codex has no turn limit; bound the run with Request.Timeout instead", agentic.ErrInvalidRequest)
 	}
 
-	args := []string{"exec", "--json"}
+	args := []string{"exec", "--json", "--skip-git-repo-check"}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
 	}
