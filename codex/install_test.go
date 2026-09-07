@@ -154,6 +154,25 @@ func serve(t *testing.T, version string, body []byte) registry {
 	return registry{url: server.URL, requests: &requests}
 }
 
+// patience bounds every wait in these tests.
+//
+// Long enough that a loaded machine does not fail a healthy run, short enough
+// that a regression fails the suite instead of hanging until the harness kills
+// it — a hang reports as a timeout naming the whole package rather than the
+// property that broke.
+const patience = 10 * time.Second
+
+// publishVersion makes a version present the way a completed install would,
+// reporting rather than failing, so it can be called from a goroutine that is
+// not the test's.
+func publishVersion(inst *Installer, version string) error {
+	dir := filepath.Join(inst.root, version, "bin")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, BinaryName), []byte("#!/bin/sh\n"), 0o700)
+}
+
 // serveHandler stands up a registry with handler-level control, for the
 // failures a well-behaved server never produces.
 func serveHandler(t *testing.T, handler http.HandlerFunc) registry {
@@ -397,11 +416,7 @@ func TestAVendoredDriverIsConfigurableBeforeItIsRunnable(t *testing.T) {
 func stage(t *testing.T, inst *Installer, version string) {
 	t.Helper()
 
-	dir := filepath.Join(inst.root, version, "bin")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("stage %s: %v", version, err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, BinaryName), []byte("#!/bin/sh\n"), 0o700); err != nil {
+	if err := publishVersion(inst, version); err != nil {
 		t.Fatalf("stage %s: %v", version, err)
 	}
 }
@@ -419,8 +434,9 @@ func TestInstalledReportsOnlyRunnableVersions(t *testing.T) {
 		t.Fatalf("prepare the stray file: %v", err)
 	}
 
-	// A staging leftover from an older layout, a name that is not a version,
-	// and a version directory whose binary never became executable.
+	// A dot-prefixed directory, which is never a version; a name that is not a
+	// version; and a version directory whose binary never became executable.
+	// None of the three is something a driver could exec.
 	for _, dir := range []string{".9.9.9-staging", "latest", "0.3.0/bin"} {
 		if err := os.MkdirAll(filepath.Join(inst.root, dir), 0o700); err != nil {
 			t.Fatalf("prepare %s: %v", dir, err)
@@ -471,16 +487,29 @@ func TestAVersionPublishedByAnotherProcessMidInstallIsAccepted(t *testing.T) {
 	pin(t, "9.9.9", integrity(body))
 
 	var inst *Installer
+	// The handler runs on the server's goroutine, where t.Fatalf is not
+	// allowed: it would unwind that goroutine instead of failing the test,
+	// truncating the response so the failure arrives as a digest mismatch
+	// naming nothing. The error travels back to the test goroutine instead.
+	staged := make(chan error, 1)
 	reg := serveHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		// Published while this download is in flight, so the fast path at the
 		// top of installOnce cannot have seen it and the rename is what
 		// collides.
-		stage(t, inst, "9.9.9")
+		staged <- publishVersion(inst, "9.9.9")
 		_, _ = w.Write(body)
 	})
 	inst = installer(t, reg)
 
 	result, err := inst.Install(t.Context(), "9.9.9")
+	select {
+	case stageErr := <-staged:
+		if stageErr != nil {
+			t.Fatalf("publishing the racing copy: %v", stageErr)
+		}
+	default:
+		t.Fatal("the registry was never asked for the tarball")
+	}
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -551,13 +580,23 @@ func TestACallerGivingUpLeavesTheOthersInstalling(t *testing.T) {
 	}()
 	cancel()
 
-	if err := <-left; !errors.Is(err, context.Canceled) {
-		t.Errorf("the departing caller got %v, want context.Canceled", err)
+	select {
+	case err := <-left:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("the departing caller got %v, want context.Canceled", err)
+		}
+	case <-time.After(patience):
+		t.Fatal("the departing caller never returned")
 	}
 
 	close(release)
-	if err := <-stayed; err != nil {
-		t.Fatalf("the caller that stayed got %v, want the install to complete", err)
+	select {
+	case err := <-stayed:
+		if err != nil {
+			t.Fatalf("the caller that stayed got %v, want the install to complete", err)
+		}
+	case <-time.After(patience):
+		t.Fatal("the caller that stayed never completed")
 	}
 	if !usable(inst.Path("9.9.9")) {
 		t.Error("the install did not publish a runnable binary")
@@ -589,12 +628,17 @@ func TestTheLastCallerLeavingStopsTheDownload(t *testing.T) {
 	<-arrived
 	cancel()
 
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Errorf("Install error = %v, want context.Canceled", err)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Install error = %v, want context.Canceled", err)
+		}
+	case <-time.After(patience):
+		t.Fatal("the cancelled caller never returned")
 	}
 	select {
 	case <-stopped:
-	case <-time.After(10 * time.Second):
+	case <-time.After(patience):
 		t.Error("the download outlived the last caller waiting on it")
 	}
 }
@@ -654,5 +698,129 @@ func TestExplicitDirectoryEntriesAreInstalled(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(inst.root, "9.9.9", wrapper)); !os.IsNotExist(err) {
 			t.Errorf("the npm wrapper's %s was installed into the version tree", wrapper)
 		}
+	}
+}
+
+// The sweep reclaims what a dead process abandoned and nothing else.
+//
+// Age is the only test available: installs of different versions run
+// concurrently, in this process and in any other sharing the providers root,
+// each holding its own staging directory. "Everything but mine" would delete a
+// tree another install is extracting into at that moment.
+func TestTheSweepReclaimsOnlyStagingTreesOldEnoughToBeAbandoned(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+	inst := installer(t, serve(t, "9.9.9", body))
+
+	if err := os.MkdirAll(inst.staging, 0o700); err != nil {
+		t.Fatalf("prepare the staging root: %v", err)
+	}
+	abandoned := filepath.Join(inst.staging, "9.9.9-abandoned")
+	live := filepath.Join(inst.staging, "9.9.9-live")
+	for _, dir := range []string{abandoned, live} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("prepare %s: %v", dir, err)
+		}
+	}
+
+	// Older than any install could still be working on.
+	stale := time.Now().Add(-2 * stagingLifetime)
+	if err := os.Chtimes(abandoned, stale, stale); err != nil {
+		t.Fatalf("backdate %s: %v", abandoned, err)
+	}
+
+	inst.sweepStaging()
+
+	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Errorf("the abandoned staging tree survived the sweep: %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("the sweep removed a staging tree a live install could own: %v", err)
+	}
+}
+
+// A clock corrected backwards leaves a stamp in the future, and a future stamp
+// is not an age. Read as a magnitude it would make the install that just
+// stamped itself look like the oldest thing on the disk.
+func TestTheSweepLeavesAStagingTreeStampedInTheFuture(t *testing.T) {
+	inst := installer(t, serve(t, "9.9.9", nil))
+
+	if err := os.MkdirAll(inst.staging, 0o700); err != nil {
+		t.Fatalf("prepare the staging root: %v", err)
+	}
+	ahead := filepath.Join(inst.staging, "9.9.9-ahead")
+	if err := os.Mkdir(ahead, 0o700); err != nil {
+		t.Fatalf("prepare %s: %v", ahead, err)
+	}
+	future := time.Now().Add(2 * stagingLifetime)
+	if err := os.Chtimes(ahead, future, future); err != nil {
+		t.Fatalf("stamp %s in the future: %v", ahead, err)
+	}
+
+	inst.sweepStaging()
+
+	if _, err := os.Stat(ahead); err != nil {
+		t.Errorf("the sweep removed a staging tree stamped in the future: %v", err)
+	}
+}
+
+// A clean install leaves the staging root empty, so the sweep has nothing to
+// reclaim in the ordinary case and disk is not held between installs.
+func TestACleanInstallLeavesNoStagingTreeBehind(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+	inst := installer(t, serve(t, "9.9.9", body))
+
+	if _, err := inst.Install(t.Context(), "9.9.9"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	entries, err := os.ReadDir(inst.staging)
+	if err != nil {
+		t.Fatalf("read the staging root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the staging root holds %d leftovers after a clean install, want none", len(entries))
+	}
+}
+
+// The staging directory's mtime tracks the start of extraction rather than the
+// start of the call, because its last direct-child change is the tree directory
+// the download's completion precedes. A sweep threshold read against the call's
+// age would shrink by however long the download took.
+func TestTheStagingStampFollowsTheDownload(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+
+	held := make(chan struct{})
+	reg := serveHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		<-held
+		_, _ = w.Write(body)
+	})
+	inst := installer(t, reg)
+
+	var stampedAt time.Time
+	inst.syncStaged = func(root string) error {
+		if info, err := os.Stat(filepath.Dir(root)); err == nil {
+			stampedAt = info.ModTime()
+		}
+		return syncTree(root)
+	}
+
+	started := time.Now()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(held)
+	}()
+	if _, err := inst.Install(t.Context(), "9.9.9"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	if stampedAt.IsZero() {
+		t.Fatal("the staging directory was never observed")
+	}
+	if !stampedAt.After(started) {
+		t.Errorf("the staging stamp is %v, from before the download finished at the earliest %v",
+			stampedAt, started)
 	}
 }

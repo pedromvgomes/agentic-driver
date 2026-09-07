@@ -2,10 +2,19 @@ package codex
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"runtime"
 	"testing"
 )
+
+// committedPins is the digest table as this package commits it.
+//
+// Captured at package initialisation, before any test runs, because the pin
+// helper injects single-platform entries for versions that exist only inside a
+// test. An invariant about what this repository ships cannot be asserted
+// against a map those entries are in.
+var committedPins = maps.Clone(pinnedDigests)
 
 // npm names platforms the Node way and Go names them its own way, so the two
 // are translated rather than assumed equal. Tested with literal inputs because
@@ -80,7 +89,7 @@ func TestPinnedDigestAnswersOnlyForCommittedBuilds(t *testing.T) {
 func TestEveryPinnedVersionCoversEveryVendoredPlatform(t *testing.T) {
 	vendored := []string{"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"}
 
-	for version, digests := range pinnedDigests {
+	for version, digests := range committedPins {
 		for _, platform := range vendored {
 			if _, ok := digests[platform]; !ok {
 				t.Errorf("version %s has no digest for %s", version, platform)

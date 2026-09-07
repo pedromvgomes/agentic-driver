@@ -23,8 +23,15 @@ import (
 // stagingLifetime is how long a staging directory may sit untouched before it is
 // taken to belong to a process that is gone.
 //
-// Comfortably longer than the download client's own 30-minute timeout, so a slow
-// but live install is never mistaken for abandoned debris.
+// A day, against an extraction of a few hundred megabytes.
+//
+// What the sweep reads is the staging directory's own mtime, and only its
+// DIRECT children advance that: the last to do so is the tree directory, created
+// once the download is already complete. Writing into the archive file and
+// extracting into the tree both land a level deeper and leave it untouched. So
+// the age this bounds is time spent EXTRACTING, no matter how long the download
+// before it took or what timeout the caller's own HTTP client carries — and a
+// day of extraction is not a live install.
 const stagingLifetime = 24 * time.Hour
 
 // DefaultRetention is how many installed versions to keep.
@@ -47,9 +54,11 @@ const DefaultRetention = 2
 // executes the helpers beside it and a directory holding only `codex` is a
 // version that runs and then fails at its first search.
 //
-// A PUBLISHED version tree is complete, because it is published by renaming a
-// tree that is already extracted and digest-checked. An install interrupted
-// before that rename can still leave a version-shaped directory behind, which is
+// A PUBLISHED version tree is complete, because the single atomic rename that
+// creates it renames a tree already extracted, digest-checked and flushed —
+// nothing else under the version root creates an entry at all. What can still
+// leave a version-shaped directory holding no runnable binary is a crash in
+// which that rename reaches the disk before the contents beneath it do, which is
 // why Installed() filters on a runnable binary rather than trusting the name.
 type Installer struct {
 	root string
@@ -58,6 +67,17 @@ type Installer struct {
 	// rename cannot cross a boundary.
 	staging string
 	release *releaseClient
+
+	// syncStaged flushes a staged tree before the rename publishes it.
+	//
+	// A field rather than a direct call, because fsync leaves nothing behind
+	// for a test to read: on any filesystem, flushing a tree's root alone and
+	// flushing every directory in it produce byte-identical results and both
+	// succeed. Without a seam here, a publishing path that quietly went back to
+	// flushing only the root would be caught by no test on any platform — and
+	// the state it produces, a rename durable ahead of the binary it publishes,
+	// is one this package cannot repair.
+	syncStaged func(root string) error
 
 	// mu guards inflight, which maps a version to the install currently
 	// downloading it.
@@ -124,10 +144,11 @@ func NewInstaller(providersRoot string, opts ...InstallerOption) (*Installer, er
 	}
 
 	return &Installer{
-		root:     filepath.Join(providersRoot, ID),
-		staging:  filepath.Join(providersRoot, "."+ID+"-staging"),
-		release:  release,
-		inflight: map[string]*install{},
+		root:       filepath.Join(providersRoot, ID),
+		staging:    filepath.Join(providersRoot, "."+ID+"-staging"),
+		release:    release,
+		syncStaged: syncTree,
+		inflight:   map[string]*install{},
 	}, nil
 }
 
@@ -387,7 +408,7 @@ func (i *Installer) installOnce(ctx context.Context, version string) (agentic.In
 	if err := extract(archive, tree); err != nil {
 		return agentic.InstallResult{}, err
 	}
-	if err := syncTree(tree); err != nil {
+	if err := i.syncStaged(tree); err != nil {
 		return agentic.InstallResult{}, err
 	}
 
@@ -509,7 +530,15 @@ func (i *Installer) sweepStaging() {
 	}
 	for _, entry := range entries {
 		info, err := entry.Info()
-		if err != nil || time.Since(info.ModTime()) < stagingLifetime {
+		if err != nil {
+			continue
+		}
+		// Compared as a signed age, so a stamp in the future — a host whose
+		// clock was corrected backwards after this directory was stamped —
+		// reads as young and is left alone. Comparing magnitudes instead would
+		// make exactly the live install that just stamped itself look like the
+		// oldest debris on the disk.
+		if time.Since(info.ModTime()) < stagingLifetime {
 			continue
 		}
 		_ = os.RemoveAll(filepath.Join(i.staging, entry.Name()))

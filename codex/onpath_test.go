@@ -1,8 +1,10 @@
 package codex
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -103,7 +105,10 @@ func TestTheVendoredBinaryIsNamedByAnAbsolutePath(t *testing.T) {
 func TestTheProviderProtectsItsPinFromItsOwnRetention(t *testing.T) {
 	p := vendored(t)
 
-	for _, v := range []string{"0.1.0", "0.2.0", PinnedVersion} {
+	// Newer than the pin, so recency alone would evict it: the pin survives
+	// only because the provider names it as protected. Staging versions OLDER
+	// than the pin would keep it on recency and assert nothing.
+	for _, v := range []string{PinnedVersion, "99.0.0", "99.1.0"} {
 		dir := filepath.Join(p.installer.root, v, "bin")
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatalf("stage %s: %v", v, err)
@@ -123,5 +128,44 @@ func TestTheProviderProtectsItsPinFromItsOwnRetention(t *testing.T) {
 	}
 	if !slices.Contains(installed, PinnedVersion) {
 		t.Errorf("Installed() = %v, want it to still hold the pinned %s", installed, PinnedVersion)
+	}
+	// The newest, kept on recency, and the middle one, kept by neither.
+	if !slices.Contains(installed, "99.1.0") {
+		t.Errorf("Installed() = %v, want it to hold the newest version", installed)
+	}
+	if slices.Contains(installed, "99.0.0") {
+		t.Errorf("Installed() = %v, want the unprotected older version pruned", installed)
+	}
+}
+
+// A version pinned for other platforms but not this one is refused where it is
+// chosen, not where the binary is finally needed.
+//
+// It fails exactly as an unknown version does — there is no digest to judge a
+// download against — so a provider that accepted it would be one whose every
+// Install fails, at the call that wanted the CLI rather than the call that
+// configured it.
+func TestAVersionPinnedForOtherPlatformsIsRefusedHere(t *testing.T) {
+	here, err := PlatformKey(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Skipf("this platform vendors no Codex build: %v", err)
+	}
+
+	// Every vendored platform except this machine's.
+	elsewhere := map[string]string{}
+	for _, platform := range []string{"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"} {
+		if platform != here {
+			elsewhere[platform] = "sha512-" + strings.Repeat("A", 86) + "=="
+		}
+	}
+	pinnedDigests["98.0.0"] = elsewhere
+	t.Cleanup(func() { delete(pinnedDigests, "98.0.0") })
+
+	_, err = New(t.TempDir(), WithVersion("98.0.0"))
+	if err == nil {
+		t.Fatal("New accepted a version with no digest for this platform")
+	}
+	if !errors.Is(err, ErrPlatformUnsupported) {
+		t.Errorf("New error = %v, want ErrPlatformUnsupported", err)
 	}
 }
