@@ -320,3 +320,15 @@ func TestATurnLimitBelowOneIsRefused(t *testing.T) {
 		t.Errorf("error = %v, want ErrInvalidRequest", err)
 	}
 }
+
+// Claude Code authenticates from a static bearer token injected as an
+// environment variable. Nothing rewrites it, so any number of runs can read it
+// at once — and a caller that finds no limit here is being told exactly that,
+// rather than being left to guess from a number nobody could justify.
+func TestClaudeCodeRunsShareACredentialFreely(t *testing.T) {
+	var p any = testProvider(t)
+
+	if _, ok := p.(agentic.ConcurrencyLimiter); ok {
+		t.Error("claudecode implements ConcurrencyLimiter; its credential is a static token no run rewrites")
+	}
+}

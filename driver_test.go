@@ -498,6 +498,50 @@ func TestResolveModelPassesThroughForAProviderThatDoesNotResolve(t *testing.T) {
 	}
 }
 
+// serialising is a provider whose credential cannot be shared: one run at a
+// time, whatever the caller would like. It can also be handed a credential, so
+// the limit can be asked of a driver in either mode.
+type serialising struct {
+	isolating
+}
+
+func (s *serialising) MaxConcurrentRuns() int { return 1 }
+
+// A caller sizing a pool asks once and gets an answer either way. Zero is
+// "nothing is claimed here", which is what an absent capability means, and it
+// is a different statement from a limit of one.
+func TestAProviderThatNamesNoLimitIsUnconstrained(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+
+	unlimited := driver(t, &stub{}, fake)
+	if got := unlimited.MaxConcurrentRuns(); got != 0 {
+		t.Errorf("MaxConcurrentRuns() = %d, want 0 for a provider that names no limit", got)
+	}
+
+	serial := driver(t, &serialising{}, fake)
+	if got := serial.MaxConcurrentRuns(); got != 1 {
+		t.Errorf("MaxConcurrentRuns() = %d, want the provider's own limit", got)
+	}
+}
+
+// The limit describes the credential the CLI resolves, not the mode this driver
+// was built with. A token handed to an isolated child does not always outrank
+// what the CLI finds on disk, so a driver that answered "isolated, therefore
+// unbounded" would be answering for a profile it cannot see.
+func TestTheLimitDoesNotVaryWithTheCredentialMode(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+
+	ambient := driver(t, &serialising{}, fake)
+	isolated := driver(t, &serialising{}, fake,
+		agentic.WithCredentials(agentic.Isolated("token")),
+		agentic.WithHome(t.TempDir()))
+
+	if ambient.MaxConcurrentRuns() != isolated.MaxConcurrentRuns() {
+		t.Errorf("ambient reports %d and isolated %d; the limit is the credential's, not the mode's",
+			ambient.MaxConcurrentRuns(), isolated.MaxConcurrentRuns())
+	}
+}
+
 // modelRecording captures the model the driver settled on.
 type modelRecording struct {
 	stub

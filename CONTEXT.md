@@ -21,6 +21,13 @@ by type assertion. A capability that is absent is absent from the type, so the *
 answers for it before spawning anything.
 _Avoid_: feature flag, option, supports-X boolean.
 
+**Concurrency limit**:
+How many runs may share one credential at a time, declared by a **Provider** implementing
+`ConcurrencyLimiter`. It is a **Capability**: absent means unconstrained. Exceeding it
+corrupts the credential rather than slowing anything down, so it is a property of how the
+CLI holds its login and not a rate a caller tunes.
+_Avoid_: rate limit, throttle, parallelism setting (all three suggest a knob about speed).
+
 **Invocation**:
 The argv after the executable plus the non-secret environment the dialect requires.
 

@@ -100,14 +100,29 @@ in effect — the concrete name a request that names none would be answered by �
 and is empty when no model has been chosen and the CLI's own default applies.
 
 Where a provider implements `ModelResolver`, a family alias resolves to the
-newest build in that family:
+newest build in that family. Both providers do, and each dialect's aliases are
+its own vendor's family names:
 
-| Alias | claudecode resolves to |
+| claudecode alias | resolves to |
 | --- | --- |
 | `opus` | `claude-opus-5` |
 | `sonnet` | `claude-sonnet-5` |
 | `haiku` | `claude-haiku-4-5` |
 | `fable` | `claude-fable-5-1` |
+
+| codex alias | resolves to |
+| --- | --- |
+| `astra` | `gpt-6-astra` |
+| `sol` | `gpt-5.6-sol` |
+| `terra` | `gpt-5.6-terra` |
+| `luna` | `gpt-5.6-luna` |
+| `mini` | `gpt-5.4-mini` |
+
+There is deliberately no vocabulary shared between the two. A `sonnet` that also
+meant something on codex would have this library assert that one vendor's model
+is the counterpart of another's — an editorial claim it has no standing to make,
+and one that would silently answer a provider swap with a model nobody chose. A
+caller that wants the same model everywhere names it concretely.
 
 Anything else is passed through untouched, so a concrete ID works and so does a
 family newer than this library.
@@ -206,6 +221,32 @@ profile holding an `auth.json` session outranks the token `Isolated` injects,
 and the key is never attempted. Nominate a profile with a session when the run
 should authenticate as that account, and pair `Isolated` with one that has
 none.
+
+## Running several agents at once
+
+A credential is not always shareable, and which one is shareable is dialect.
+`ConcurrencyLimiter` is how a caller finds out before it fans out:
+
+```go
+limit := driver.MaxConcurrentRuns() // 0 means nothing is claimed: unconstrained
+```
+
+- **codex** implements it and answers `1`. `codex exec` authenticates from
+  `auth.json` under `CODEX_HOME`, rewrites that file in place as it refreshes,
+  and its refresh tokens are effectively single-use — so two runs sharing a
+  profile race to refresh it and leave a broken login behind, not a slow queue.
+- **claudecode** does not implement it. A static bearer token in an environment
+  variable is read, never rewritten, and any number of runs can read it at once.
+
+Copying a profile into a directory per run does not lift the limit: the same
+single-use refresh token is in every copy, so the first refresh invalidates the
+rest. Only genuinely separate logins run concurrently — one driver each. See
+[ADR 0005](docs/adr/0005-concurrency-is-a-property-of-the-credential.md).
+
+The answer is the provider's and does not change with the credential mode.
+`Isolated` injects a token, but a Codex profile holding a session outranks it, so
+a driver claiming "isolated, therefore unbounded" would be answering for a
+profile it cannot see.
 
 ## Testing
 

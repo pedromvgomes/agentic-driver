@@ -236,6 +236,27 @@ func (d *Driver) ResolveModel(name string) string {
 	return resolver.ResolveModel(name)
 }
 
+// MaxConcurrentRuns reports how many runs may share this provider's credential
+// at a time, or 0 for a provider that names no limit.
+//
+// Zero means unconstrained rather than "cannot run", so a caller sizing a pool
+// can read the answer without first asking whether the capability exists. There
+// is nothing here for an absent one to fail at.
+//
+// The answer is the provider's and does not vary with the credential mode this
+// driver was built with. Isolated hands the CLI a token, but a token does not
+// always outrank what the CLI finds on disk — a codex profile holding a session
+// wins over the injected OPENAI_API_KEY — so a driver reporting "isolated,
+// therefore unbounded" would be answering for a configuration it cannot see.
+// The limit is what the credential the CLI actually resolves can bear.
+func (d *Driver) MaxConcurrentRuns() int {
+	limiter, ok := d.provider.(ConcurrencyLimiter)
+	if !ok {
+		return 0
+	}
+	return limiter.MaxConcurrentRuns()
+}
+
 // Run executes one request and returns what the provider made of it.
 //
 // A non-nil error means the invocation could not be carried out or could not be
