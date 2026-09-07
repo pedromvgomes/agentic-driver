@@ -186,6 +186,26 @@ Three layers, and only the third costs money:
 3. **`go test -tags integration ./...`** — drives the real CLIs. Excluded from
    the default suite and from CI, and run by hand.
 
+## Releasing
+
+A release is an annotated tag on `main`, and the tag's own message is the
+release notes — `gt CD` reads it and publishes the GitHub release from it. The
+subject line is the version; everything after it is the body:
+
+```
+v0.4.0
+
+Vendor the Codex CLI at a pinned version checked against a committed digest.
+
+Breaking, for anyone implementing Provider:
+  - ...
+```
+
+A lightweight tag, or an annotation with nothing after its subject line, fails
+the publish stage rather than producing a release with no notes. Delivery also
+refuses a tree that never passed `ci-gate`, so a tag on unvalidated code does
+not ship.
+
 ## Status
 
 Early. The API is not stable. `claudecode` is complete. `codex` drives

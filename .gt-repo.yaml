@@ -28,4 +28,5 @@ pipeline:
       - build
       - test
   cd:
-    enabled: false
+    stages:
+      - publish
