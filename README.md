@@ -207,6 +207,32 @@ and the key is never attempted. Nominate a profile with a session when the run
 should authenticate as that account, and pair `Isolated` with one that has
 none.
 
+## Running several agents at once
+
+A credential is not always shareable, and which one is shareable is dialect.
+`ConcurrencyLimiter` is how a caller finds out before it fans out:
+
+```go
+limit := driver.MaxConcurrentRuns() // 0 means nothing is claimed: unconstrained
+```
+
+- **codex** implements it and answers `1`. `codex exec` authenticates from
+  `auth.json` under `CODEX_HOME`, rewrites that file in place as it refreshes,
+  and its refresh tokens are effectively single-use — so two runs sharing a
+  profile race to refresh it and leave a broken login behind, not a slow queue.
+- **claudecode** does not implement it. A static bearer token in an environment
+  variable is read, never rewritten, and any number of runs can read it at once.
+
+Copying a profile into a directory per run does not lift the limit: the same
+single-use refresh token is in every copy, so the first refresh invalidates the
+rest. Only genuinely separate logins run concurrently — one driver each. See
+[ADR 0005](docs/adr/0005-concurrency-is-a-property-of-the-credential.md).
+
+The answer is the provider's and does not change with the credential mode.
+`Isolated` injects a token, but a Codex profile holding a session outranks it, so
+a driver claiming "isolated, therefore unbounded" would be answering for a
+profile it cannot see.
+
 ## Testing
 
 Three layers, and only the third costs money:

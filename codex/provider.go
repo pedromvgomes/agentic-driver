@@ -492,6 +492,28 @@ func publish(path string, content []byte) error {
 	return os.Rename(tmp.Name(), path)
 }
 
+// MaxConcurrentRuns is one: codex runs cannot share a credential.
+//
+// `codex exec` authenticates from auth.json under CODEX_HOME, a file it
+// REWRITES IN PLACE as it refreshes, and the refresh tokens in it are
+// effectively single-use. Two runs reading that file at once race to refresh
+// it: the second presents a token the first has already spent, and the profile
+// they both authenticate from is left holding whichever half-rotated state lost
+// the race. The cost is a broken login, not a slow one, which is why this is a
+// limit the provider states rather than a rate a caller tunes.
+//
+// Pointing concurrent runs at separate directories does not lift it. Copies of
+// one session are not independent sessions: the refresh token is the same
+// single-use token in every copy, so the first refresh invalidates the rest and
+// can invalidate the profile they were copied from. Only genuinely separate
+// logins are genuinely concurrent, and this library has no way to tell one from
+// a copy. See docs/adr/0005.
+//
+// claudecode implements nothing here. It authenticates from a static bearer
+// token injected as an environment variable, which nothing rewrites and any
+// number of runs can read at once.
+func (p *dialect) MaxConcurrentRuns() int { return 1 }
+
 // AuthEnv carries an OpenAI key.
 //
 // A different variable from claudecode's, which is the point of the vocabulary
@@ -572,17 +594,19 @@ func (p *dialect) DenyEnv() []string {
 // asserts on Installer to decide whether to trust a build would get the same
 // answer in both cases.
 var (
-	_ agentic.Provider          = (*Provider)(nil)
-	_ agentic.Isolator          = (*Provider)(nil)
-	_ agentic.Permitter         = (*Provider)(nil)
-	_ agentic.SchemaConstrainer = (*Provider)(nil)
-	_ agentic.Pinner            = (*Provider)(nil)
+	_ agentic.Provider           = (*Provider)(nil)
+	_ agentic.Isolator           = (*Provider)(nil)
+	_ agentic.Permitter          = (*Provider)(nil)
+	_ agentic.SchemaConstrainer  = (*Provider)(nil)
+	_ agentic.ConcurrencyLimiter = (*Provider)(nil)
+	_ agentic.Pinner             = (*Provider)(nil)
 
 	// The same dialect, minus the capability that depends on owning the binary.
 	// A PathProvider that gained a Pinner would be claiming to have chosen a
 	// build it merely found.
-	_ agentic.Provider          = (*PathProvider)(nil)
-	_ agentic.Isolator          = (*PathProvider)(nil)
-	_ agentic.Permitter         = (*PathProvider)(nil)
-	_ agentic.SchemaConstrainer = (*PathProvider)(nil)
+	_ agentic.Provider           = (*PathProvider)(nil)
+	_ agentic.Isolator           = (*PathProvider)(nil)
+	_ agentic.Permitter          = (*PathProvider)(nil)
+	_ agentic.SchemaConstrainer  = (*PathProvider)(nil)
+	_ agentic.ConcurrencyLimiter = (*PathProvider)(nil)
 )

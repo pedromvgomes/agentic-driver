@@ -116,6 +116,29 @@ type ModelResolver interface {
 	ResolveModel(name string) string
 }
 
+// ConcurrencyLimiter is optional: the provider's credential cannot be shared by
+// an unlimited number of concurrent runs.
+//
+// Absent means unconstrained, which is the honest default — a caller that
+// discovers nothing here is being told nothing, and running one agent at a time
+// is always safe. Present, the limit is a property of how the CLI holds its
+// credential and not a tuning knob: exceeding it corrupts the credential rather
+// than slowing anything down, and a run that starts with a credential another
+// run has since rewritten fails as an authentication error miles from its
+// cause.
+//
+// It carries a count rather than reporting a fact the type already states. A
+// method answering "yes, serialise" would say exactly what implementing the
+// interface says, so a caller building a semaphore would still have nothing to
+// size it from; the number is the only thing the assertion cannot answer by
+// itself.
+type ConcurrencyLimiter interface {
+	// MaxConcurrentRuns is how many runs may share one credential at a time.
+	// It is at least 1: a provider that could run nothing at all would be
+	// unusable rather than limited.
+	MaxConcurrentRuns() int
+}
+
 // Resumer is optional: the provider can continue a prior session.
 type Resumer interface {
 	// ResumeArgs returns the arguments that continue sessionID. The provider's

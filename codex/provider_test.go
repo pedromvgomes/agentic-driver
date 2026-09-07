@@ -258,3 +258,41 @@ func TestTheGitRepositoryCheckFlagStandsAheadOfThePrompt(t *testing.T) {
 		t.Errorf("argv = %q, want the flag ahead of the prompt", inv.Args)
 	}
 }
+
+// codex authenticates from auth.json under CODEX_HOME, rewrites it in place as
+// it refreshes, and its refresh tokens are effectively single-use. Two runs
+// sharing that file race to refresh it and leave the profile holding whichever
+// half-rotated state lost, so the cost of ignoring this is a broken login
+// rather than a slow queue.
+func TestCodexRunsCannotShareACredential(t *testing.T) {
+	var p any = onPath(t)
+
+	limiter, ok := p.(agentic.ConcurrencyLimiter)
+	if !ok {
+		t.Fatal("codex does not implement ConcurrencyLimiter, so a caller fanning out has no way to learn it must not")
+	}
+	if got := limiter.MaxConcurrentRuns(); got != 1 {
+		t.Errorf("MaxConcurrentRuns() = %d, want 1: auth.json cannot be shared by concurrent runs", got)
+	}
+}
+
+// The credential vocabulary is dialect, and so is the limit on sharing it: the
+// two constructors differ on which binary runs, not on the profile it reads.
+func TestBothConstructorsReportTheSameLimit(t *testing.T) {
+	if got := vendored(t).MaxConcurrentRuns(); got != onPath(t).MaxConcurrentRuns() {
+		t.Errorf("the vendored provider reports %d and the PATH one %d", got, onPath(t).MaxConcurrentRuns())
+	}
+}
+
+// A driver answers for the capability without a caller asserting on anything.
+func TestTheDriverReportsTheCodexLimit(t *testing.T) {
+	fake := (&agentictest.Fake{}).Build(t)
+
+	d, err := agentic.New(onPath(t), agentic.WithBinary(fake.Path()))
+	if err != nil {
+		t.Fatalf("agentic.New: %v", err)
+	}
+	if got := d.MaxConcurrentRuns(); got != 1 {
+		t.Errorf("MaxConcurrentRuns() = %d, want codex's own limit", got)
+	}
+}
