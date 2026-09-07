@@ -29,6 +29,11 @@ func collect(t *testing.T, d *agentic.Driver, req agentic.Request) ([]agentic.Ev
 	return events, nil
 }
 
+const unreadableLines = `{"kind":"text","text":"one"}
+{"kind":"unreadable","text":"cannot unmarshal string into field message"}
+{"kind":"result","text":"done"}
+`
+
 const eventLines = `{"kind":"noise"}
 {"kind":"text","text":"one"}
 {"kind":"text","text":"two"}
@@ -206,5 +211,39 @@ func TestATerminalResultOutranksATimeout(t *testing.T) {
 	}
 	if result.Text != "done" {
 		t.Errorf("Text = %q, want the answer that arrived before the stall", result.Text)
+	}
+}
+
+// A line the provider models but cannot read reaches the caller. It is not an
+// error — the run's result still arrives — but a caller rendering the turn has
+// to be able to show that something happened it could not read, and one
+// diagnosing a CLI whose output has moved needs the line itself. Skipping it
+// with the lines nobody models makes both indistinguishable from silence.
+func TestAnUnreadableLineIsYieldedRatherThanSkipped(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: unreadableLines}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	events, err := collect(t, d, agentic.Request{Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+
+	var unreadable []agentic.Event
+	for _, e := range events {
+		if e.Kind == agentic.EventKindUnreadable {
+			unreadable = append(unreadable, e)
+		}
+	}
+	if len(unreadable) != 1 {
+		t.Fatalf("got %d unreadable events, want the one the provider could not read", len(unreadable))
+	}
+	if unreadable[0].Text == "" || len(unreadable[0].Raw) == 0 {
+		t.Errorf("unreadable event = %+v, want the reason and the undecoded line", unreadable[0])
+	}
+	// The run still produces its result: an unreadable line is progress, not
+	// the outcome.
+	last := events[len(events)-1]
+	if last.Kind != agentic.EventKindResult || last.Result.Text != "done" {
+		t.Errorf("last event = %+v, want the terminal result", last)
 	}
 }
