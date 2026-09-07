@@ -216,3 +216,62 @@ func TestAToolResultIsTextWhicheverShapeItArrivesIn(t *testing.T) {
 		})
 	}
 }
+
+// A message's content is a bare string on some lines and a list of blocks on
+// others, the same way a tool result's is. A decoder that fits only one shape
+// fails the whole run on a stream that is working, and the caller sees a
+// transport failure rather than a line it could have skipped.
+func TestAMessageWhoseContentIsAStringDoesNotFailTheRun(t *testing.T) {
+	p := testProvider(t)
+
+	for name, line := range map[string]string{
+		"user":      `{"type":"user","message":{"role":"user","content":"resuming"}}`,
+		"assistant": `{"type":"assistant","message":{"role":"assistant","content":"a plain answer"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := p.NewDecoder(agentic.Request{}).Decode([]byte(line)); err != nil {
+				t.Errorf("Decode(%s): %v", line, err)
+			}
+		})
+	}
+}
+
+// The string form of an assistant message carries the answer itself, so it
+// reaches a caller as text rather than being dropped as an unmodelled line.
+func TestAStringAssistantMessageIsText(t *testing.T) {
+	p := testProvider(t)
+
+	event := decodeOne(t, p, `{"type":"assistant","message":{"role":"assistant","content":"a plain answer"}}`)
+	if event.Kind != agentic.EventKindText {
+		t.Fatalf("Kind = %v, want text", event.Kind)
+	}
+	if event.Text != "a plain answer" {
+		t.Errorf("Text = %q, want the message body", event.Text)
+	}
+}
+
+// A string user message is the prompt echoed back, not a tool answering, so it
+// yields nothing for a caller watching tools work.
+func TestAStringUserMessageYieldsNoToolResult(t *testing.T) {
+	p := testProvider(t)
+
+	event := decodeOne(t, p, `{"type":"user","message":{"role":"user","content":"resuming"}}`)
+	if event.Kind != agentic.EventKindUnknown {
+		t.Errorf("Kind = %v, want the zero event", event.Kind)
+	}
+}
+
+// The block form keeps working: the two shapes are alternatives, and a decoder
+// that accepted the string by giving up on blocks would lose every tool result.
+func TestBlockContentStillDecodes(t *testing.T) {
+	p := testProvider(t)
+
+	event := decodeOne(t, p,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"file contents"}]}}`)
+	if event.Kind != agentic.EventKindToolResult {
+		t.Fatalf("Kind = %v, want tool_result", event.Kind)
+	}
+	if event.Text != "file contents" {
+		t.Errorf("Text = %q, want the tool output", event.Text)
+	}
+}
