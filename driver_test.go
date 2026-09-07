@@ -85,6 +85,8 @@ func (d *stubDecoder) Decode(line []byte) (agentic.Event, error) {
 	switch event.Kind {
 	case "text":
 		return agentic.Event{Kind: agentic.EventKindText, Text: event.Text}, nil
+	case "unreadable":
+		return agentic.Event{Kind: agentic.EventKindUnreadable, Text: event.Text, Raw: append([]byte(nil), line...)}, nil
 	case "result":
 		d.result, d.complete = agentic.Result{Text: event.Text}, true
 		return agentic.Event{}, nil

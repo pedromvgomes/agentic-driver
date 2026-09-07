@@ -422,6 +422,20 @@ const (
 	EventKindToolUse EventKind = "tool_use"
 	// EventKindToolResult is a tool answering.
 	EventKindToolResult EventKind = "tool_result"
+	// EventKindUnreadable is a line whose type the provider models but whose
+	// shape it could not read. Raw carries the line and Text the reason.
+	//
+	// Distinct from EventKindUnknown, which the driver skips: a line nobody
+	// models is noise, while one the provider should have understood is a
+	// signal — usually that the CLI's output has moved. A caller rendering a
+	// turn shows that something happened it could not read; one diagnosing a
+	// version drift reads Raw. Dropping it makes both indistinguishable from
+	// a turn where nothing happened.
+	//
+	// Not an error, because the run's outcome arrives on the terminal line
+	// regardless, and failing a run over a line that only drives display would
+	// trade the result for the progress bar.
+	EventKindUnreadable EventKind = "unreadable"
 	// EventKindResult is the terminal event, built by the driver from the
 	// decoder's fold. Its Result is the same value Run returns, because Run is
 	// this event and nothing else.

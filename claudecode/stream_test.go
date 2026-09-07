@@ -302,20 +302,27 @@ func TestAnUnmodelledLineCannotFailTheRunWhateverItsShape(t *testing.T) {
 	}
 }
 
-// A modelled line whose shape is unreadable is skipped rather than fatal. The
-// event stream drives progress display; the run's outcome comes off the
-// terminal line, so losing one tool call a caller was going to watch is not
-// worth failing a run that produced a result.
-func TestAModelledLineWithAnUnreadableShapeIsSkipped(t *testing.T) {
+// A modelled line whose shape is unreadable is surfaced rather than dropped.
+// It is not fatal — the run's outcome comes off the terminal line — but a
+// caller rendering the turn has to be able to show that something happened it
+// could not read, and one diagnosing a CLI version drift needs the line
+// itself. Swallowing it makes the two indistinguishable from silence.
+func TestAModelledLineWithAnUnreadableShapeIsSurfaced(t *testing.T) {
 	p := testProvider(t)
 
-	event, err := p.NewDecoder(agentic.Request{}).Decode(
-		[]byte(`{"type":"user","message":"resuming from a summary"}`))
+	line := `{"type":"user","message":"resuming from a summary"}`
+	event, err := p.NewDecoder(agentic.Request{}).Decode([]byte(line))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if event.Kind != agentic.EventKindUnknown {
-		t.Errorf("Kind = %v, want the zero event", event.Kind)
+	if event.Kind != agentic.EventKindUnreadable {
+		t.Fatalf("Kind = %v, want unreadable", event.Kind)
+	}
+	if string(event.Raw) != line {
+		t.Errorf("Raw = %s, want the undecoded line", event.Raw)
+	}
+	if event.Text == "" {
+		t.Error("Text is empty; a caller diagnosing this has nothing to show")
 	}
 }
 

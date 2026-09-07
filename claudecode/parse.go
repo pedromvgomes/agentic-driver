@@ -258,11 +258,17 @@ func (d *decoder) Decode(line []byte) (agentic.Event, error) {
 	switch head.Type {
 	case "assistant", "user":
 		if err := json.Unmarshal(line, &ev); err != nil {
-			// Skipped rather than fatal. These events drive progress display,
-			// while the run's outcome comes off the terminal line, so a shape
-			// this package cannot read costs a caller one tool call it was
-			// going to watch — not the result it was waiting for.
-			return agentic.Event{}, nil
+			// Surfaced rather than dropped, and not fatal either. The run's
+			// outcome arrives on the terminal line, so failing here would
+			// trade the result for a line that only drives display — but
+			// swallowing it leaves a caller rendering the turn unable to show
+			// that anything happened, and one diagnosing a CLI whose output
+			// has moved with nothing to look at.
+			return agentic.Event{
+				Kind: agentic.EventKindUnreadable,
+				Text: err.Error(),
+				Raw:  clone(line),
+			}, nil
 		}
 	}
 
