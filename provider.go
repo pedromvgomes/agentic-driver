@@ -210,25 +210,63 @@ type SchemaConstrainer interface {
 	SchemaArgs(schema json.RawMessage) ([]string, error)
 }
 
-// Installer is optional: only for providers that vendor a binary.
+// Pinner is optional: the provider vendors its own copy of the CLI and runs it
+// at an exact version.
+//
+// What it buys is not immobility but knowing when the CLI changed. Every
+// provider decodes an output schema it does not own, against fixtures captured
+// from a real binary, and a CLI that updates itself underneath one moves that
+// schema without saying so. The break then surfaces on a user's machine as a
+// decode failure. Pinned, it surfaces at the bump, as a failing test against a
+// re-captured fixture.
 //
 // Implementing it also settles where the binary comes from. A vendored CLI is
-// executed by absolute path at a pinned version, so there is no PATH lookup for
-// something else to win and no launcher symlink to repoint — the binary that
-// runs is the one that was verified against the publisher's signature.
-type Installer interface {
+// executed by absolute path, so there is no PATH lookup for something else to
+// win and no launcher symlink to repoint — the binary that runs is the one
+// whose bytes were checked against a digest this repository commits.
+type Pinner interface {
 	// BinaryPath is the absolute path of the pinned version. It is answered
 	// whether or not that version is installed yet, because Install is how it
 	// gets there.
 	BinaryPath() string
 
-	// Install fetches a version and verifies it against the publisher's
-	// signature. An empty version means the provider's pin.
+	// Install fetches a version and refuses any bytes but the ones the pin
+	// names. An empty version means the provider's pin.
 	Install(ctx context.Context, version string) (InstallResult, error)
 	// Installed lists the versions present, newest first.
 	Installed(ctx context.Context) ([]string, error)
 	// Prune trims old versions, never removing the pin.
 	Prune(ctx context.Context, keep int) error
+}
+
+// Installer is Pinner plus provenance: the artifact is signed by a named
+// publisher, and the trust anchor that names them is embedded in this
+// repository rather than fetched alongside the artifact.
+//
+// The two are separate capabilities because they answer different questions and
+// are separately achievable. "Which version runs" is settled by a committed
+// digest, which any publisher's bytes can satisfy. "Who built it" needs a
+// signature and a key, and a provider whose vendor publishes no signature this
+// library can check cannot make that claim on any platform where the signature
+// does not exist. Folding both into one interface would make every pinning
+// provider assert a provenance it may not have.
+//
+// SigningIdentity is what keeps the two distinguishable by type assertion. An
+// Installer that added no method would be satisfied by every Pinner, so the
+// driver could not tell a verified build from a merely pinned one — which is
+// the whole distinction.
+type Installer interface {
+	Pinner
+
+	// SigningIdentity names the trust anchor the artifact was verified
+	// against, in whatever form a human can compare with the publisher's own
+	// published value.
+	//
+	// It carries a value rather than reporting a capability. A method whose
+	// only job is to answer "yes, verified" states nothing an auditor can
+	// check, and the question a caller actually has — verified by WHOM — would
+	// still have nowhere to be answered.
+	SigningIdentity() string
 }
 
 // Descriptor identifies a provider.

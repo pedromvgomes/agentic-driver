@@ -40,14 +40,45 @@ func workspace(t *testing.T) string {
 func integrationDriver(t *testing.T) *agentic.Driver {
 	t.Helper()
 
-	d, err := agentic.New(New(), agentic.WithTimeout(3*time.Minute), agentic.WithWorkDir(workspace(t)))
+	d, err := agentic.New(onPath(t), agentic.WithTimeout(3*time.Minute), agentic.WithWorkDir(workspace(t)))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if err := d.Ready(); err != nil {
 		t.Skipf("codex is not runnable here: %v", err)
 	}
+	requirePinnedVersion(t, d.Binary())
 	return d
+}
+
+// requirePinnedVersion refuses to run these tests against any build but the
+// pinned one.
+//
+// Everything in testdata was captured from that build, and these tests are the
+// standing claim that the capture still matches. Run against a different
+// version they answer a question nobody asked: a pass says some codex somewhere
+// emits something the decoder accepts, while the fixtures the rest of the suite
+// depends on go on describing a CLI nothing checked.
+func requirePinnedVersion(t *testing.T, binary string) {
+	t.Helper()
+
+	out, err := exec.Command(binary, "--version").Output()
+	if err != nil {
+		t.Skipf("cannot read the version of %s: %v", binary, err)
+	}
+
+	// `codex --version` prints "codex-cli 0.153.4". The version is taken as the
+	// last field rather than by trimming a prefix, so a vendor that renames the
+	// product does not silently turn this into a skip.
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		t.Skipf("%s --version printed nothing", binary)
+	}
+	got := fields[len(fields)-1]
+	if got != PinnedVersion {
+		t.Skipf("codex on PATH is %s, the fixtures were captured from %s; "+
+			"run against the pinned build, or move the pin and re-capture testdata", got, PinnedVersion)
+	}
 }
 
 // The claim every fixture rests on: the real CLI still emits what testdata

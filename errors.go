@@ -52,4 +52,10 @@ var (
 	// ErrInstallUnsupported means the provider vendors no binary, so there is
 	// nothing for Install to fetch.
 	ErrInstallUnsupported = errors.New("provider installs nothing")
+
+	// ErrProvenanceUnsupported means the provider does not verify a publisher's
+	// signature over the binary it runs. A provider that pins a version still
+	// lands here: a committed digest settles WHICH bytes run, and says nothing
+	// about who built them.
+	ErrProvenanceUnsupported = errors.New("provider verifies no publisher signature")
 )

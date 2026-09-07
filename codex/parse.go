@@ -31,7 +31,7 @@ type event struct {
 }
 
 // NewDecoder returns a decoder for one run.
-func (p *Provider) NewDecoder(req agentic.Request) agentic.Decoder {
+func (p *dialect) NewDecoder(req agentic.Request) agentic.Decoder {
 	return &decoder{schema: req.Schema != nil}
 }
 

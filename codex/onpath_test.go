@@ -1,0 +1,97 @@
+package codex
+
+import (
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	agentic "github.com/pedromvgomes/agentic-driver"
+)
+
+// onPath builds the PATH provider, which is the one every dialect test wants:
+// flag spelling, the envelope and the credential vocabulary are the same object
+// whichever binary ends up running, and a vendored provider would drag a
+// providers root into tests that have nothing to say about installing.
+func onPath(t *testing.T) *PathProvider {
+	t.Helper()
+
+	p, err := NewOnPath()
+	if err != nil {
+		t.Fatalf("NewOnPath: %v", err)
+	}
+	return p
+}
+
+// vendored builds the pinned provider, skipping where this package vendors no
+// build for the machine running the test.
+func vendored(t *testing.T) *Provider {
+	t.Helper()
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Skipf("this platform vendors no Codex build: %v", err)
+	}
+	return p
+}
+
+// Pinning a version is a request for a specific build, and a provider that runs
+// whatever PATH resolves to cannot honour it. Refusing is what stops the
+// request from being answered with a substitution nobody was told about.
+func TestPinningAVersionNeedsAVendoredInstall(t *testing.T) {
+	if _, err := NewOnPath(WithVersion(PinnedVersion)); err == nil {
+		t.Fatal("NewOnPath accepted WithVersion; a PATH lookup cannot honour a pin")
+	}
+}
+
+// The absence is the capability. A driver asks whether it can install by
+// asserting on the interface, so a PathProvider that satisfied Pinner would
+// answer yes and then hand out a path it never chose.
+func TestThePathProviderClaimsNoControlOverTheBinary(t *testing.T) {
+	var p any = onPath(t)
+
+	if _, ok := p.(agentic.Pinner); ok {
+		t.Error("PathProvider implements Pinner; it runs a build it did not choose")
+	}
+	if _, ok := p.(agentic.Installer); ok {
+		t.Error("PathProvider implements Installer; it verified nothing")
+	}
+}
+
+// Vendoring settles which bytes run and says nothing about who built them. The
+// two interfaces exist to keep those apart, so the vendored provider must
+// satisfy exactly the first.
+func TestTheVendoredProviderPinsWithoutClaimingProvenance(t *testing.T) {
+	var p any = vendored(t)
+
+	if _, ok := p.(agentic.Pinner); !ok {
+		t.Error("Provider does not implement Pinner; it vendors a binary at a pinned version")
+	}
+	if _, ok := p.(agentic.Installer); ok {
+		t.Error("Provider implements Installer; no publisher signature is checked on every platform it vendors on")
+	}
+}
+
+// A version with no committed digest could never be installed, so accepting one
+// here builds a provider whose every Install fails — at the call that needed the
+// binary rather than the call that chose it.
+func TestAVersionWithNoCommittedDigestIsRefusedAtConstruction(t *testing.T) {
+	if _, err := New(t.TempDir(), WithVersion("0.1.0")); err == nil {
+		t.Fatal("New accepted an unpinned version; there is nothing to check its download against")
+	}
+}
+
+// The binary is named by an absolute path rather than looked up, so nothing on
+// PATH and no repointed symlink can substitute a different build between the
+// pin and the exec.
+func TestTheVendoredBinaryIsNamedByAnAbsolutePath(t *testing.T) {
+	path := vendored(t).BinaryPath()
+
+	if !filepath.IsAbs(path) {
+		t.Fatalf("BinaryPath() = %q, want an absolute path", path)
+	}
+	segments := strings.Split(filepath.ToSlash(path), "/")
+	if !slices.Contains(segments, PinnedVersion) {
+		t.Errorf("BinaryPath() = %q, want it to name the pinned version %s", path, PinnedVersion)
+	}
+}

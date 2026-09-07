@@ -21,9 +21,17 @@ func isolators(t *testing.T) map[string]agentic.Isolator {
 	if err != nil {
 		t.Fatalf("claudecode.New: %v", err)
 	}
+	// The PATH providers, because the credential vocabulary is dialect: it is
+	// the same list whether the binary was vendored or found, and a vendored
+	// provider would need a providers root this property has nothing to say
+	// about.
+	openai, err := codex.NewOnPath()
+	if err != nil {
+		t.Fatalf("codex.NewOnPath: %v", err)
+	}
 	return map[string]agentic.Isolator{
 		claudecode.ID: claude,
-		codex.ID:      codex.New(),
+		codex.ID:      openai,
 	}
 }
 

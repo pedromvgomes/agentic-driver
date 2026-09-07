@@ -39,16 +39,36 @@ fmt.Println(result.Text, result.Usage.CostUSD)
 
 ## Where the binary comes from
 
-Two providers, one dialect, differing in the capability that actually separates
-them:
+Each provider ships two constructors, one dialect, differing in the capability
+that actually separates them:
 
-- `claudecode.NewOnPath()` runs whichever `claude` is on PATH. It implements no
-  `Installer`, because a provider that runs someone else's binary cannot claim
-  the guarantee that comes with installing one.
-- `claudecode.New(providersRoot)` installs its own copy at a pinned version,
-  verified against Anthropic's signed manifest, and executes it by absolute
-  path — so no PATH entry and no repointed symlink can substitute a build
-  nobody verified.
+- `NewOnPath()` runs whichever CLI is on PATH. It implements neither `Pinner`
+  nor `Installer`, because a provider that runs someone else's binary has
+  chosen no version and can vouch for none.
+- `New(providersRoot)` installs its own copy at a pinned version and executes it
+  by absolute path — so no PATH entry and no repointed symlink can substitute a
+  different build.
+
+Those are two guarantees, not one, and they are two interfaces:
+
+- **`Pinner`** — I control which version runs. Both vendored providers implement
+  it. It is what keeps each decoder and the fixtures it was written against
+  describing the same CLI: an unpinned agent that updates itself moves its
+  output schema silently, and the break lands on a user mid-run instead of on a
+  red test at the bump.
+- **`Installer`** — `Pinner`, plus a named publisher signed the artifact.
+  `claudecode` implements it, verifying a signed manifest against an embedded
+  key, and `SigningIdentity()` returns the fingerprint an operator compares
+  against Anthropic's published one. `codex` does not: OpenAI signs its
+  linux-musl release assets alone, and the npm channel that attests every
+  platform needs a dependency tree an order of magnitude larger than this
+  library. `codex` pins a committed tarball digest instead and checks the
+  attestation by hand when the pin moves — see
+  [ADR 0004](docs/adr/0004-pinning-and-provenance-are-separate-capabilities.md).
+
+`Driver.SigningIdentity()` answers `ErrProvenanceUnsupported` for a provider
+that pins without verifying a signature, which is a different state from
+vendoring nothing at all.
 
 A vendoring provider is constructed before its binary exists, because `Install`
 is how it gets there. `Driver.Ready()` reports whether a run could actually
@@ -190,11 +210,12 @@ Three layers, and only the third costs money:
 
 Early. The API is not stable. `claudecode` is complete. `codex` drives
 single-turn runs: `StreamCommand`, the decoder, `PermissionArgs`, `SchemaArgs`,
-`AuthEnv` and `DenyEnv` are written against captured output from the real CLI.
-It declares no `TurnLimiter` (codex has no turn bound), no `AgentDefiner` and no
-`Installer`,
-and its `PermissionArgs` refuses `AllowedTools` outright — codex has no per-tool
-allowlist, and accepting one could only mean discarding it.
+`AuthEnv` and `DenyEnv` are written against captured output from the real CLI,
+at the version `codex.New` pins. It declares no `TurnLimiter` (codex has no turn
+bound), no `AgentDefiner` and no `Installer`, and its `PermissionArgs` refuses
+`AllowedTools` outright — codex has no per-tool allowlist, and accepting one
+could only mean discarding it. `codex.New` vendors on darwin and linux;
+Windows uses `codex.NewOnPath`.
 
 ## License
 

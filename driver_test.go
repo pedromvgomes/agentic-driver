@@ -370,6 +370,19 @@ func TestInstallingIsRefusedByAProviderThatVendorsNothing(t *testing.T) {
 	}
 }
 
+// Pinning and provenance are different claims, and a provider making the first
+// must not be read as making the second. A caller auditing what it runs asks
+// the driver, and the answer has to distinguish "bytes nobody vouched for" from
+// "bytes whose builder this library did not confirm".
+func TestProvenanceIsRefusedByAProviderThatVerifiesNoSignature(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	if _, err := d.SigningIdentity(); !errors.Is(err, agentic.ErrProvenanceUnsupported) {
+		t.Errorf("error = %v, want ErrProvenanceUnsupported", err)
+	}
+}
+
 func TestIsolatedCredentialsAreRefusedAtConstruction(t *testing.T) {
 	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
 

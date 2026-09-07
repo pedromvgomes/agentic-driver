@@ -38,7 +38,7 @@ func TestSchemaArgsWritesTheSchemaItNames(t *testing.T) {
 	// what makes this a test of the write.
 	path := removeSchemaFile(t, schema)
 
-	args, err := New().SchemaArgs(schema)
+	args, err := onPath(t).SchemaArgs(schema)
 	if err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestAPlantedSchemaFileIsReplaced(t *testing.T) {
 		t.Fatalf("planting a file: %v", err)
 	}
 
-	if _, err := New().SchemaArgs(schema); err != nil {
+	if _, err := onPath(t).SchemaArgs(schema); err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
 	written, err := os.ReadFile(path)
@@ -114,7 +114,7 @@ func TestASymlinkAtTheSchemaNameIsReplaced(t *testing.T) {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
 
-	if _, err := New().SchemaArgs(schema); err != nil {
+	if _, err := onPath(t).SchemaArgs(schema); err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
 
@@ -182,7 +182,7 @@ func TestASchemaThatCannotBeWrittenIsAnOutage(t *testing.T) {
 // other way — one truncated mid-document leaves text that is not a document,
 // and the CLI reports that turn a success.
 func TestATruncatedAnswerIsAnUnmetConstraintOnASuccessfulTurn(t *testing.T) {
-	decoder := New().NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	decoder := onPath(t).NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
 	for _, line := range []string{
 		`{"type":"thread.started","thread_id":"77777777-7777-4777-8777-777777777777"}`,
 		`{"type":"turn.started"}`,
@@ -214,7 +214,7 @@ func TestATruncatedAnswerIsAnUnmetConstraintOnASuccessfulTurn(t *testing.T) {
 // A JSON null satisfies every syntactic test and answers nothing: unmarshalling
 // it leaves the caller's value zeroed with no sign anything went wrong.
 func TestANullAnswerIsNotAPayload(t *testing.T) {
-	decoder := New().NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	decoder := onPath(t).NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
 	for _, line := range []string{
 		`{"type":"thread.started","thread_id":"77777777-7777-4777-8777-777777777777"}`,
 		`{"type":"turn.started"}`,
@@ -237,7 +237,7 @@ func TestANullAnswerIsNotAPayload(t *testing.T) {
 // saying anything about it. A turn that completes carrying no agent message at
 // all has no explanation to borrow, so the decoder supplies one.
 func TestAnUnmetConstraintAlwaysSaysSomething(t *testing.T) {
-	decoder := New().NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	decoder := onPath(t).NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
 	for _, line := range []string{
 		`{"type":"thread.started","thread_id":"77777777-7777-4777-8777-777777777777"}`,
 		`{"type":"turn.started"}`,
@@ -262,11 +262,11 @@ func TestAnUnmetConstraintAlwaysSaysSomething(t *testing.T) {
 // Stream issue different argv for the same Request, and make a logged
 // invocation incomparable to the next one.
 func TestTheSchemaPathIsTheSameForTheSameSchema(t *testing.T) {
-	first, err := New().SchemaArgs(schema)
+	first, err := onPath(t).SchemaArgs(schema)
 	if err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
-	second, err := New().SchemaArgs(schema)
+	second, err := onPath(t).SchemaArgs(schema)
 	if err != nil {
 		t.Fatalf("SchemaArgs again: %v", err)
 	}
@@ -286,11 +286,11 @@ func TestTheSchemaPathIsTheSameForTheSameSchema(t *testing.T) {
 func TestDifferentSchemasGetDifferentFiles(t *testing.T) {
 	other := json.RawMessage(`{"type":"object","properties":{"finding":{"type":"string"}}}`)
 
-	mine, err := New().SchemaArgs(schema)
+	mine, err := onPath(t).SchemaArgs(schema)
 	if err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
-	theirs, err := New().SchemaArgs(other)
+	theirs, err := onPath(t).SchemaArgs(other)
 	if err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestDifferentSchemasGetDifferentFiles(t *testing.T) {
 // The flag precedes the prompt, which is positional and last, so nothing the
 // prompt contains can be read as a flag.
 func TestStreamCommandCarriesTheSchemaBeforeThePrompt(t *testing.T) {
-	inv, err := New().StreamCommand(agentic.Request{Prompt: "review this", Schema: schema})
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "review this", Schema: schema})
 	if err != nil {
 		t.Fatalf("StreamCommand: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestStreamCommandCarriesTheSchemaBeforeThePrompt(t *testing.T) {
 // A request that asks for no schema emits no flag, so the CLI's own
 // unconstrained behaviour applies.
 func TestNoSchemaMeansNoFlag(t *testing.T) {
-	inv, err := New().StreamCommand(agentic.Request{Prompt: "hi"})
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi"})
 	if err != nil {
 		t.Fatalf("StreamCommand: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestSchemaArgsAcceptsWhatTheDriverHasAlreadyValidated(t *testing.T) {
 	// document. What it must not do is invent a second opinion about a
 	// well-formed one the CLI would have accepted.
 	odd := json.RawMessage(`{"type":"banana"}`)
-	if _, err := New().SchemaArgs(odd); err != nil {
+	if _, err := onPath(t).SchemaArgs(odd); err != nil {
 		t.Errorf("SchemaArgs refused a well-formed schema: %v", err)
 	}
 }
@@ -443,7 +443,7 @@ func TestSchemaArgsAcceptsWhatTheDriverHasAlreadyValidated(t *testing.T) {
 // This is the case the driver's own json.Valid check exists to prevent reaching
 // the CLI, and the fixture is what says the check is worth having.
 func TestASchemaFileCodexCannotReadLeavesNoResultToReport(t *testing.T) {
-	decoder := New().NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
+	decoder := onPath(t).NewDecoder(agentic.Request{Prompt: "hi", Schema: schema})
 	if _, complete := decoder.Result(); complete {
 		t.Error("a decoder that has seen nothing reports a result")
 	}
@@ -471,7 +471,7 @@ func TestADirectoryAtTheSchemaNameIsReplaced(t *testing.T) {
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatalf("planting a directory: %v", err)
 	}
-	if _, err := New().SchemaArgs(schema); err != nil {
+	if _, err := onPath(t).SchemaArgs(schema); err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
 
@@ -489,7 +489,7 @@ func TestADirectoryAtTheSchemaNameIsReplaced(t *testing.T) {
 func TestASchemaReapedBetweenRunsIsRepublished(t *testing.T) {
 	path := removeSchemaFile(t, schema)
 
-	p := New()
+	p := onPath(t)
 	if _, err := p.SchemaArgs(schema); err != nil {
 		t.Fatalf("SchemaArgs: %v", err)
 	}
@@ -517,7 +517,7 @@ func TestASchemaReapedBetweenRunsIsRepublished(t *testing.T) {
 func TestConcurrentRunsSharingASchemaAllReceiveIt(t *testing.T) {
 	removeSchemaFile(t, schema)
 
-	p := New()
+	p := onPath(t)
 	argv := make([][]string, 8)
 	var wg sync.WaitGroup
 	for i := range argv {
