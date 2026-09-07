@@ -51,6 +51,10 @@ const BinaryName = "codex"
 // envelope it prints, and the variables that carry or redirect its credential.
 // Which binary runs is the only thing they differ on.
 type dialect struct {
+	// configDir is the directory nominated by WithConfigDir, exported to the
+	// child as CODEX_HOME. Empty means the CLI uses its own default.
+	configDir string
+
 	// publishing holds one lock per schema file, keyed by its name.
 	//
 	// It saves work and nothing else. Correctness across concurrent runs comes
@@ -93,6 +97,7 @@ type Option func(*config)
 type config struct {
 	version    string
 	versionSet bool
+	configDir  string
 }
 
 // WithVersion overrides the pinned version New installs and runs. It must be a
@@ -102,6 +107,28 @@ type config struct {
 // it.
 func WithVersion(v string) Option {
 	return func(c *config) { c.version, c.versionSet = v, true }
+}
+
+// WithConfigDir sets CODEX_HOME, the directory a spawned codex reads its
+// configuration and its credential from.
+//
+// Without it the CLI uses the caller's own ~/.codex, so a run authenticates as
+// the human sitting at the machine and writes to their profile. Nominate a
+// directory whenever the run is not that human's own.
+//
+// The directory carries the credential, not just settings: `codex exec` reads
+// its session from $CODEX_HOME/auth.json, which is why --ignore-user-config
+// still honours this variable. A nominated directory holding a session
+// therefore OUTRANKS the token Isolated injects as OPENAI_API_KEY — codex uses
+// the session and never attempts the key. Pair a config dir holding a session
+// with Ambient credentials, and Isolated with a directory that has none.
+//
+// Unlike claudecode's equivalent this does not also override HOME. There the
+// override exists because a Node program writes its cache beside its config;
+// codex resolves its whole profile from this one variable, so overriding HOME
+// would buy nothing and would silently defeat Driver.WithHome.
+func WithConfigDir(dir string) Option {
+	return func(c *config) { c.configDir = dir }
 }
 
 func settings(opts []Option) config {
@@ -145,7 +172,11 @@ func New(providersRoot string, opts ...Option) (*Provider, error) {
 		return nil, fmt.Errorf("codex: %w", err)
 	}
 
-	return &Provider{installer: inst, version: cfg.version}, nil
+	return &Provider{
+		dialect:   dialect{configDir: cfg.configDir},
+		installer: inst,
+		version:   cfg.version,
+	}, nil
 }
 
 // NewOnPath builds a provider that runs whichever codex is on PATH.
@@ -165,7 +196,7 @@ func NewOnPath(opts ...Option) (*PathProvider, error) {
 		return nil, errors.New("codex: WithVersion needs a vendored install; NewOnPath runs whatever is on PATH")
 	}
 
-	return &PathProvider{}, nil
+	return &PathProvider{dialect: dialect{configDir: cfg.configDir}}, nil
 }
 
 // Version reports the version this provider runs.
@@ -250,7 +281,7 @@ func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error)
 	// a flag.
 	args = append(args, req.Prompt)
 
-	return agentic.Invocation{Args: args, Env: map[string]string{"NO_COLOR": "1", "TERM": "dumb"}}, nil
+	return agentic.Invocation{Args: args, Env: p.dialectEnv()}, nil
 }
 
 // sandboxModes is what -s accepts. Ordered as codex documents them, widening
@@ -460,6 +491,25 @@ func (p *dialect) AuthEnv(token string) map[string]string {
 	return map[string]string{"OPENAI_API_KEY": token}
 }
 
+// dialectEnv is the non-secret environment every codex run needs.
+//
+// HOME is deliberately absent. codex resolves its configuration AND its
+// credential from CODEX_HOME alone, so nominating a directory needs one
+// variable; setting HOME as well would override the one Driver.WithHome
+// nominated, without redirecting anything CODEX_HOME had not already.
+func (p *dialect) dialectEnv() map[string]string {
+	env := map[string]string{
+		// codex draws a TUI when it thinks it has one. Every byte here is
+		// parsed, so the redraws are noise in the middle of it.
+		"NO_COLOR": "1",
+		"TERM":     "dumb",
+	}
+	if p.configDir != "" {
+		env["CODEX_HOME"] = p.configDir
+	}
+	return env
+}
+
 // DenyEnv is every variable that can redirect Codex away from the key it was
 // handed.
 //
@@ -468,7 +518,7 @@ func (p *dialect) AuthEnv(token string) map[string]string {
 // list would have to be the union, and every entry in it would be wrong for
 // somebody.
 func (p *dialect) DenyEnv() []string {
-	return []string{
+	denied := []string{
 		"OPENAI_API_KEY",
 		"OPENAI_BASE_URL",
 		"OPENAI_API_BASE",
@@ -478,6 +528,19 @@ func (p *dialect) DenyEnv() []string {
 		"AZURE_OPENAI_ENDPOINT",
 		"CODEX_API_KEY",
 	}
+	// CODEX_HOME redirects the whole profile, and the profile is where the
+	// credential lives: a session under it outranks the token AuthEnv injects,
+	// so an inherited value reroutes the run's identity outright.
+	//
+	// It is denied only when this dialect does not set it. buildEnv scrubs the
+	// assembled environment, dialect variables included, so denying a variable
+	// this provider exports would strip the caller's own nomination — which is
+	// why the claudecode dialect likewise omits CLAUDE_CONFIG_DIR. With no
+	// config dir there is nothing to protect and the backstop applies.
+	if p.configDir == "" {
+		denied = append(denied, "CODEX_HOME")
+	}
+	return denied
 }
 
 // Compile-time proof of which capabilities each provider claims. Neither

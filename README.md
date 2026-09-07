@@ -193,6 +193,20 @@ driver, err := agentic.New(provider,
     agentic.WithHome(configDir))
 ```
 
+Either provider can also be pointed at its own configuration directory, so a run
+does not read or mutate the profile of the human at the machine:
+
+```go
+provider, err := codex.NewOnPath(codex.WithConfigDir(profile))       // CODEX_HOME
+provider, err := claudecode.NewOnPath(claudecode.WithConfigDir(dir)) // CLAUDE_CONFIG_DIR
+```
+
+For Codex that directory carries the credential as well as the settings: a
+profile holding an `auth.json` session outranks the token `Isolated` injects,
+and the key is never attempted. Nominate a profile with a session when the run
+should authenticate as that account, and pair `Isolated` with one that has
+none.
+
 ## Testing
 
 Three layers, and only the third costs money:

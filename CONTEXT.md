@@ -120,6 +120,19 @@ Resolution: the library reports the OUTCOME, never the mechanism. A payload is
 `Result.Structured`; its absence on a run that required one is an **unmet constraint**.
 Nothing in the library derives behaviour from which of the two produced it.
 
+**"Config directory"** — both providers take `WithConfigDir`, and it redirects a
+different amount in each.
+`CLAUDE_CONFIG_DIR` names where Claude Code keeps its settings, and the claudecode dialect
+overrides `HOME` alongside it so a Node program writes its cache inside the nominated
+directory rather than the operator's. `CODEX_HOME` names the whole Codex profile —
+configuration AND `auth.json` — so the codex dialect sets that one variable and leaves
+`HOME` to `Driver.WithHome`.
+Resolution: the option means "the directory this run reads its own configuration from" in
+both. What differs is the credential. A Codex profile holding a session OUTRANKS the token
+**Isolated** injects as `OPENAI_API_KEY`: codex uses the session and never attempts the
+key. Pair a nominated profile that holds a session with **Ambient**, and **Isolated** with
+one that holds none.
+
 **"Tool allowlist"** — assumed to exist everywhere because Claude Code has one.
 Resolution: it is a **Capability**, not a given. Codex has no per-tool allowlist of any
 kind, so it refuses `AllowedTools` rather than accepting and discarding it.
