@@ -1,0 +1,113 @@
+# cd-publish — this file is yours.
+#
+# gt created it once and will never modify or delete it again. Put this
+# repository's artifact publishing here; the orchestration around it stays gt's.
+#
+# It is called by cd-orchestration.yml and must keep `workflow_call`, or the
+# orchestrator loses the stage.
+#
+# A Go module has nothing to upload: the proxy serves it from the tag itself.
+# What delivery means here is the GitHub release, and the notes are the whole
+# point of it — a tag is a pointer, and the sentence saying what the version is
+# for lives in the annotated tag's own message.
+name: cd-publish
+
+on:
+  workflow_call:
+
+# Narrowed from what the orchestrator grants: creating a release needs
+# contents: write, and nothing here touches GitHub Packages.
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0 for the tag OBJECT, not just the commit. The release
+      # body is the annotated tag's message, and a shallow checkout resolves
+      # the tag to its commit without fetching the annotation that carries it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # workflow_dispatch can start this pipeline from a branch, where there is
+      # no version to release. Refusing is not a failure of delivery; there is
+      # simply nothing to deliver.
+      - name: Establish that a version was tagged
+        id: tag
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+            echo "::notice::${GITHUB_REF} is not a tag; nothing to release"
+            echo "release=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "release=true" >> "${GITHUB_OUTPUT}"
+          echo "name=${GITHUB_REF#refs/tags/}" >> "${GITHUB_OUTPUT}"
+
+      # The notes come from the tag, so a tag carrying none is refused here
+      # rather than published as an empty release. The alternative — generating
+      # the body from commit subjects — says only which pull requests landed,
+      # which is what the compare link already says and is not what a reader
+      # opening a release wants to know.
+      - name: Read the release notes from the annotated tag
+        if: steps.tag.outputs.release == 'true'
+        id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$(git cat-file -t "${TAG}")" != "tag" ]]; then
+            echo "::error::${TAG} is a lightweight tag and carries no message; release notes live in the tag annotation"
+            exit 1
+          fi
+
+          # contents:body is everything after the tag message's subject line,
+          # which is the shape every tag in this repository already has: the
+          # version on the first line, then the prose.
+          body="$(git for-each-ref "refs/tags/${TAG}" --format='%(contents:body)')"
+          if [[ -z "${body//[[:space:]]/}" ]]; then
+            echo "::error::${TAG}'s annotation has no body; write the release notes into the tag message"
+            exit 1
+          fi
+
+          {
+            printf '%s\n' "${body}"
+            previous="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+            if [[ -n "${previous}" ]]; then
+              printf '\n**Full changelog**: %s/compare/%s...%s\n' \
+                "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" "${previous}" "${TAG}"
+            fi
+          } > release-notes.md
+
+          echo "--- release notes ---"
+          cat release-notes.md
+
+      # Idempotent so a re-run repairs a release rather than failing on it:
+      # the tag is already public by the time this stage runs, and a delivery
+      # that cannot be retried leaves the version permanently without notes.
+      - name: Create or update the GitHub release
+        if: steps.tag.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --notes-file release-notes.md --verify-tag
+            echo "::notice::updated the notes on the existing ${TAG} release"
+            exit 0
+          fi
+
+          # --verify-tag refuses to invent a tag: this stage publishes the one
+          # that triggered it, and never creates a version by typo.
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes-file release-notes.md \
+            --verify-tag
+          echo "::notice::published the ${TAG} release"
