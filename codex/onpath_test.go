@@ -169,3 +169,42 @@ func TestAVersionPinnedForOtherPlatformsIsRefusedHere(t *testing.T) {
 		t.Errorf("New error = %v, want ErrPlatformUnsupported", err)
 	}
 }
+
+// The pinned version is what a caller who names none is asking for, so
+// "install what you need" is a request that can be made without knowing the
+// number.
+func TestInstallingNothingInParticularInstallsThePin(t *testing.T) {
+	body := wellFormed(t)
+	repin(t, PinnedVersion, integrity(body))
+	reg := serve(t, PinnedVersion, body)
+
+	p, err := New(t.TempDir())
+	if err != nil {
+		t.Skipf("this platform vendors no Codex build: %v", err)
+	}
+	p.installer, err = NewInstaller(t.TempDir(), WithBaseURL(reg.url))
+	if err != nil {
+		t.Fatalf("NewInstaller: %v", err)
+	}
+
+	result, err := p.Install(t.Context(), "")
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if result.Version != PinnedVersion {
+		t.Errorf("Install(\"\") installed %s, want the pinned %s", result.Version, PinnedVersion)
+	}
+	if p.Version() != PinnedVersion {
+		t.Errorf("Version() = %s, want %s", p.Version(), PinnedVersion)
+	}
+}
+
+// A version that is not a version reaches both a filesystem path and a URL, so
+// it is refused where it is chosen rather than interpolated into either.
+func TestAVersionThatIsNotAVersionIsRefusedAtConstruction(t *testing.T) {
+	for _, version := range []string{"latest", "../../etc", "v1.2.3-"} {
+		if _, err := New(t.TempDir(), WithVersion(version)); err == nil {
+			t.Errorf("New(WithVersion(%q)) was accepted", version)
+		}
+	}
+}

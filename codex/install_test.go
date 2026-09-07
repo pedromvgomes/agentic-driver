@@ -824,3 +824,126 @@ func TestTheStagingStampFollowsTheDownload(t *testing.T) {
 			stampedAt, started)
 	}
 }
+
+// repin substitutes a digest for a version already in the committed table and
+// restores it afterwards, so a test can drive the pinned version against a
+// fabricated package without leaving the real digest changed for the next one.
+func repin(t *testing.T, version, digest string) {
+	t.Helper()
+
+	platform, err := PlatformKey(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Skipf("this platform vendors no Codex build: %v", err)
+	}
+	previous, existed := pinnedDigests[version]
+	pinnedDigests[version] = map[string]string{platform: digest}
+	t.Cleanup(func() {
+		if existed {
+			pinnedDigests[version] = previous
+			return
+		}
+		delete(pinnedDigests, version)
+	})
+}
+
+// The root is joined onto and the result is executed, so a relative one would
+// resolve against whatever working directory the child happened to inherit —
+// the PATH-style ambiguity an absolute path exists to remove.
+func TestAnInstallerNeedsAnAbsoluteProvidersRoot(t *testing.T) {
+	for _, root := range []string{"", "relative/providers", "./providers"} {
+		if _, err := NewInstaller(root); err == nil {
+			t.Errorf("NewInstaller(%q) was accepted", root)
+		}
+	}
+}
+
+// A caller replacing the HTTP client is how a test reaches the installer at
+// all, so the option has to actually reach the release client.
+func TestTheHTTPClientCanBeReplaced(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+	reg := serve(t, "9.9.9", body)
+
+	inst, err := NewInstaller(t.TempDir(), WithBaseURL(reg.url), WithHTTPClient(&http.Client{Timeout: patience}))
+	if err != nil {
+		t.Skipf("this platform vendors no Codex build: %v", err)
+	}
+	if _, err := inst.Install(t.Context(), "9.9.9"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+}
+
+// A version already present is reported without downloading anything, which is
+// what makes "install what you need" cheap to call before every run.
+func TestAnInstalledVersionIsReportedWithoutDownloadingIt(t *testing.T) {
+	body := wellFormed(t)
+	pin(t, "9.9.9", integrity(body))
+	reg := serve(t, "9.9.9", body)
+	inst := installer(t, reg)
+
+	if _, err := inst.Install(t.Context(), "9.9.9"); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	asked := reg.requests.Load()
+
+	second, err := inst.Install(t.Context(), "9.9.9")
+	if err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if !second.AlreadyPresent {
+		t.Errorf("second Install = %+v, want AlreadyPresent", second)
+	}
+	if got := reg.requests.Load(); got != asked {
+		t.Errorf("the registry was asked %d more times for a version already present", got-asked)
+	}
+}
+
+// Retention of nothing is not a policy anyone can mean, so a keep below one is
+// read as one rather than emptying the disk of every version.
+func TestPruneKeepsAtLeastOneVersion(t *testing.T) {
+	inst := installer(t, serve(t, "9.9.9", nil))
+	for _, v := range []string{"0.1.0", "0.2.0"} {
+		stage(t, inst, v)
+	}
+
+	if err := inst.Prune(t.Context(), 0); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	installed, _ := inst.Installed(t.Context())
+	if len(installed) != 1 || installed[0] != "0.2.0" {
+		t.Errorf("Installed() = %v, want [0.2.0]", installed)
+	}
+}
+
+// A protected version survives even as debris. An install may be publishing it
+// at this moment, and a half-finished directory is what installing over it
+// repairs — removing it instead would delete the tree being written.
+func TestPruneLeavesDebrisUnderAProtectedVersion(t *testing.T) {
+	inst := installer(t, serve(t, "9.9.9", nil))
+	stage(t, inst, "0.9.0")
+	debris := filepath.Join(inst.root, "0.1.0", "bin")
+	if err := os.MkdirAll(debris, 0o700); err != nil {
+		t.Fatalf("prepare the debris: %v", err)
+	}
+
+	if err := inst.Prune(t.Context(), 1, "0.1.0"); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(inst.root, "0.1.0")); err != nil {
+		t.Errorf("Prune removed a protected version's directory: %v", err)
+	}
+}
+
+// Versions order newest first, and anything unparseable sorts last rather than
+// being dropped — a directory nobody can order is still a directory that exists.
+func TestVersionsOrderNewestFirstAndKeepWhatCannotBeParsed(t *testing.T) {
+	got := []string{"0.2.0", "not-a-version", "0.153.4", "also-junk", "0.9.0"}
+	sortVersionsNewestFirst(got)
+
+	want := []string{"0.153.4", "0.9.0", "0.2.0", "not-a-version", "also-junk"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("sorted = %v, want %v", got, want)
+	}
+}
