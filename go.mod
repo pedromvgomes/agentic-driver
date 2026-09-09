@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/ProtonMail/go-crypto v1.4.1
-	golang.org/x/mod v0.40.0
+	golang.org/x/mod v0.41.0
 )
 
 require (
