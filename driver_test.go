@@ -882,3 +882,36 @@ func (l *limiting) StreamCommand(req agentic.Request) (agentic.Invocation, error
 	}
 	return inv, nil
 }
+
+// blockingStub reads one block reason and not the other, which is the shape the
+// capability exists to make visible: a caller routing around a spent allowance
+// cannot use a provider that only recognises a rejected token.
+type blockingStub struct{ stub }
+
+func (b *blockingStub) DetectableBlocks() []agentic.BlockReason {
+	return []agentic.BlockReason{agentic.BlockRejected}
+}
+
+func TestADriverReportsOnlyTheBlockReasonsItsProviderCanRead(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+
+	d := driver(t, &blockingStub{}, fake)
+
+	got := d.DetectableBlocks()
+	if len(got) != 1 || got[0] != agentic.BlockRejected {
+		t.Fatalf("DetectableBlocks() = %v, want [%q]", got, agentic.BlockRejected)
+	}
+}
+
+// Nil is the honest answer for a provider that claims nothing, and a caller
+// reads it without first asking whether the capability is there. A chain built
+// on this provider will never fire, and this is where that is discoverable.
+func TestAProviderThatReadsNoBlocksClaimsNone(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+
+	d := driver(t, &stub{}, fake)
+
+	if got := d.DetectableBlocks(); got != nil {
+		t.Fatalf("DetectableBlocks() = %v, want nil", got)
+	}
+}

@@ -113,6 +113,7 @@ func (p *dialect) Parse(stdout, stderr []byte, code int) (agentic.Result, error)
 		Model:      env.model(),
 		Turns:      env.NumTurns,
 		IsError:    env.IsError,
+		Blocked:    env.blocked(),
 		Usage: agentic.Usage{
 			InputTokens:         env.Usage.InputTokens,
 			OutputTokens:        env.Usage.OutputTokens,
@@ -121,6 +122,48 @@ func (p *dialect) Parse(stdout, stderr []byte, code int) (agentic.Result, error)
 			CostUSD:             env.TotalCostUSD,
 		},
 	}, nil
+}
+
+// DetectableBlocks names the reasons this dialect can recognise.
+//
+// Both, because both arrive as an HTTP status in a field of the envelope that is
+// already decoded. A status is wire contract: it is the same integer whatever
+// the CLI's message says, in whatever language it says it.
+func (p *dialect) DetectableBlocks() []agentic.BlockReason {
+	return []agentic.BlockReason{agentic.BlockExhausted, agentic.BlockRejected}
+}
+
+// blocked reads the envelope's api_error_status as a block, or nil.
+//
+// The status is the whole signal. Claude Code reports a blocked run the way it
+// reports a rejected token — subtype "success", is_error true, and the status in
+// api_error_status — so neither the subtype nor the exit code separates them, and
+// the human-readable result is display copy that is localised and rewritten
+// between releases. Keying on the prose would produce a dialect that recognises
+// exactly the wording it was written against.
+//
+// is_error is required alongside it. The field is documented as carrying the
+// status of an API error, so a status present on a turn the CLI did not call a
+// failure is not a statement that the run was refused.
+//
+// A status this does not model is not a block. It is left as the ordinary bad
+// verdict it already was, which correctly tells a caller not to route on it.
+func (e envelope) blocked() *agentic.Block {
+	if !e.IsError {
+		return nil
+	}
+
+	// No reset time accompanies either status. The envelope has no field for
+	// one: Claude Code reports its window resets on the status line, which is a
+	// channel a scripted run never reads. A zero ResetsAt is the honest answer,
+	// and Reason already says whether the block lifts on a clock at all.
+	switch e.APIErrorStatus {
+	case 429:
+		return &agentic.Block{Reason: agentic.BlockExhausted}
+	case 401:
+		return &agentic.Block{Reason: agentic.BlockRejected}
+	}
+	return nil
 }
 
 // text is the agent's answer, or the explanation for why there is none.

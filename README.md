@@ -222,6 +222,53 @@ and the key is never attempted. Nominate a profile with a session when the run
 should authenticate as that account, and pair `Isolated` with one that has
 none.
 
+## Falling back to another provider
+
+A run can fail because the work failed, or because the provider will not serve the
+credential at all. Only the second is worth retrying somewhere else — falling back on
+the first spends a second subscription on a task that fails wherever it runs — and
+`IsError` is `true` for both. `Result.Blocked` is what separates them:
+
+```go
+result, err := driver.Run(ctx, req)
+if err != nil {
+    return err // an outage: nothing was said about the request
+}
+if result.Blocked != nil {
+    switch result.Blocked.Reason {
+    case agentic.BlockExhausted:
+        // The allowance is spent. It lifts on a clock; ResetsAt says when, if
+        // the provider reported one. Route elsewhere.
+    case agentic.BlockRejected:
+        // The credential is invalid. It never lifts on its own.
+    }
+}
+```
+
+Ask what a provider can actually recognise BEFORE building a chain on it:
+
+```go
+reasons := driver.DetectableBlocks() // nil means nothing is claimed
+```
+
+- **claudecode** implements `BlockReporter` and names both reasons. Claude Code reports a
+  blocked run the way it reports a rejected token — `subtype: "success"`, `is_error` set,
+  and the HTTP status in `api_error_status` — so the status is the whole signal.
+- **codex** does not implement it. Its only event stream is `codex exec --json`, whose
+  terminal `turn.failed` carries a prose message and nothing else, and a dialect that
+  matched that English would recognise exactly the wording it was written against.
+
+That asymmetry is the point of the capability. Without it a chain built on codex looks
+identical to one built on claudecode right up to the night a window runs out, when the
+run comes back as an ordinary failed turn and the fallback never fires.
+
+The library signals; it does not route. A `Driver` binds one provider at `New`, and a
+`Request` is not portable between dialects — `AllowedTools` and `PermissionMode` are
+spelled in the provider's own vocabulary, `SessionID` does not cross at all — so retrying
+"the same request" elsewhere would silently run a different one. Composition over two
+drivers belongs above this library. See
+[ADR 0006](docs/adr/0006-blocks-are-verdicts-and-the-caller-routes.md).
+
 ## Running several agents at once
 
 A credential is not always shareable, and which one is shareable is dialect.
