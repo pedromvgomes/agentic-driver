@@ -257,6 +257,26 @@ func (d *Driver) MaxConcurrentRuns() int {
 	return limiter.MaxConcurrentRuns()
 }
 
+// DetectableBlocks names the block reasons this provider's dialect can
+// recognise, or nil for a provider that recognises none.
+//
+// Nil means nothing is claimed rather than "never blocked", and a caller reads
+// the answer without first asking whether the capability exists — there is
+// nothing here for an absent one to fail at, the way there is nothing for
+// MaxConcurrentRuns.
+//
+// A caller building a fallback chain asks this BEFORE it builds one. A provider
+// that cannot read a spent allowance will report an exhausted run as an ordinary
+// failed turn, and a chain keyed on Result.Blocked will sit there never firing —
+// which is discovered, without this, on the night the window runs out.
+func (d *Driver) DetectableBlocks() []BlockReason {
+	reporter, ok := d.provider.(BlockReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.DetectableBlocks()
+}
+
 // Run executes one request and returns what the provider made of it.
 //
 // A non-nil error means the invocation could not be carried out or could not be

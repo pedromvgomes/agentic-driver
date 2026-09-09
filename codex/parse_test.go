@@ -284,3 +284,30 @@ func containsKind(kinds []agentic.EventKind, want agentic.EventKind) bool {
 	}
 	return false
 }
+
+// Codex reads no blocks, and the absence is asserted rather than left implicit.
+//
+// Its only event stream is `codex exec --json`, whose terminal `turn.failed`
+// carries the failure as a prose message and nothing else — the error-code
+// vocabulary the CLI keeps internally never reaches the wire. Recognising a
+// spent allowance would mean matching English that is display copy, so the
+// dialect claims neither reason and a caller building a fallback chain can see
+// that before it depends on one.
+func TestCodexClaimsNoBlocksItCannotRead(t *testing.T) {
+	var subject agentic.Provider = onPath(t)
+	if _, ok := subject.(agentic.BlockReporter); ok {
+		t.Fatal("codex claims to report blocks, but turn.failed carries only prose")
+	}
+}
+
+// A rejected credential is still a verdict, and still not a block.
+func TestARejectedCredentialIsAVerdictWithNoBlock(t *testing.T) {
+	got, _, _ := fold(t, "rejected-auth.ndjson", agentic.Request{})
+
+	if !got.IsError {
+		t.Error("a rejected credential is not a successful verdict")
+	}
+	if got.Blocked != nil {
+		t.Errorf("Blocked = %+v, want nil from a dialect that reads no blocks", got.Blocked)
+	}
+}

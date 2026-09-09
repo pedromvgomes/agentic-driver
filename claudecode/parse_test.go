@@ -12,10 +12,12 @@ import (
 	"strings"
 )
 
-// golden reads a committed envelope. The files under testdata are raw output
-// from the real CLI, which is what makes Parse a pure function tested against
-// the thing it has to survive rather than against a fixture written to match
-// it.
+// golden reads a committed envelope. The files under testdata are the CLI's own
+// output, which is what makes Parse a pure function tested against the thing it
+// has to survive rather than against a fixture written to match it. Where an
+// outcome cannot be produced on demand the envelope is derived from the pinned
+// artifact instead, and testdata/README.md records which files those are and
+// what they came from.
 func golden(t *testing.T, name string) []byte {
 	t.Helper()
 
@@ -283,6 +285,89 @@ func TestDenyEnvNamesEveryOverridingVariable(t *testing.T) {
 	} {
 		if !slices.Contains(denied, name) {
 			t.Errorf("DenyEnv does not name %s", name)
+		}
+	}
+}
+
+func TestASpentAllowanceIsAVerdictNamingItsReason(t *testing.T) {
+	p := testProvider(t)
+
+	got, err := p.Parse(golden(t, "blocked-exhausted.json"), nil, 0)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if got.Blocked == nil {
+		t.Fatal("a run refused for a spent allowance reports no block")
+	}
+	if got.Blocked.Reason != agentic.BlockExhausted {
+		t.Errorf("reason = %q, want %q", got.Blocked.Reason, agentic.BlockExhausted)
+	}
+	if !got.IsError {
+		t.Error("a blocked run is not a successful verdict")
+	}
+	// The envelope carries no reset time, and inventing one would send a caller
+	// back to a provider that is still blocked.
+	if !got.Blocked.ResetsAt.IsZero() {
+		t.Errorf("ResetsAt = %v, want zero", got.Blocked.ResetsAt)
+	}
+}
+
+func TestARejectedCredentialIsABlockRatherThanAFailedTask(t *testing.T) {
+	p := testProvider(t)
+
+	got, err := p.Parse(golden(t, "rejected-auth.json"), nil, 0)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if got.Blocked == nil {
+		t.Fatal("a rejected credential reports no block")
+	}
+	if got.Blocked.Reason != agentic.BlockRejected {
+		t.Errorf("reason = %q, want %q", got.Blocked.Reason, agentic.BlockRejected)
+	}
+}
+
+// A turn the agent simply failed must not route a caller anywhere. Reporting it
+// as a block spends a second credential on work that fails wherever it runs.
+func TestAnOrdinaryFailedTurnNamesNoBlock(t *testing.T) {
+	p := testProvider(t)
+
+	for _, name := range []string{"success.json", "max-turns.json", "structured-unmet.json"} {
+		got, err := p.Parse(golden(t, name), nil, 0)
+		if err != nil {
+			t.Fatalf("Parse %s: %v", name, err)
+		}
+		if got.Blocked != nil {
+			t.Errorf("%s: reports block %+v, want none", name, got.Blocked)
+		}
+	}
+}
+
+// The status is only a block alongside the CLI's own declaration of failure.
+func TestAStatusOnASuccessfulTurnIsNoBlock(t *testing.T) {
+	var e envelope
+	e.APIErrorStatus = 429
+
+	if got := e.blocked(); got != nil {
+		t.Errorf("blocked() = %+v on a turn that did not fail, want nil", got)
+	}
+}
+
+func TestTheDialectNamesBothReasonsItCanRead(t *testing.T) {
+	p := testProvider(t)
+
+	var subject agentic.Provider = p
+	reporter, ok := subject.(agentic.BlockReporter)
+	if !ok {
+		t.Fatal("claudecode does not report blocks")
+	}
+
+	got := reporter.DetectableBlocks()
+	for _, want := range []agentic.BlockReason{agentic.BlockExhausted, agentic.BlockRejected} {
+		if !slices.Contains(got, want) {
+			t.Errorf("DetectableBlocks() = %v, missing %q", got, want)
 		}
 	}
 }

@@ -73,6 +73,40 @@ A run that carried a **Schema** is the exception, and the **unmet constraint** w
 an agent explaining in prose that it was not allowed to act has not answered in the shape
 it was required to answer in, so `IsError` is set. The sandbox still did its job; the
 caller still did not get what it asked for, and those are two different questions.
+_Avoid_: block, rejection (a **Block** is the opposite outcome — a failed verdict about
+the credential, where a refusal is a successful one about an action).
+
+**Block**:
+The provider cannot serve this credential right now. A block is a **Verdict** and a failed
+one: `Result` is populated, the error is nil, `IsError` is set and `Blocked` names the
+reason. It is the one bad verdict that is a statement about the CREDENTIAL rather than
+about the request — every other one says the run was considered and went badly, while a
+block says the request was never considered at all. That is what makes it the outcome a
+caller routes on: it is the only one where trying the same request against a different
+**Provider** is the right response.
+
+Two reasons are modelled, and a reason exists only where the caller's correct response
+differs. **Exhausted** means the credential's allowance for the current window is spent;
+it lifts on a clock, and `ResetsAt` says when where the **Provider** reports it. **Rejected**
+means the credential is invalid or expired; it never lifts on its own and a human must act.
+An unrecognised failure is not a block: it is `IsError` with no `Blocked`, which correctly
+tells a caller not to route on it.
+
+A block is a **Verdict** on whichever channel the **Provider** learns it from. "This
+credential is spent" is a statement about the request, so reading it as an **Outage** would
+tell a caller "unknown failure, perhaps retry" where the truth is "definitively blocked, go
+elsewhere". A **Provider** reads a block from a wire token — a status code, a typed field —
+and never from a CLI's own prose, which is display copy that changes between releases.
+_Avoid_: rate limit, throttle (both suggest a **Concurrency limit**, which is about
+sharing one credential across simultaneous runs and is not an outcome at all); refusal.
+
+**Detectable blocks**:
+Which **Block** reasons a **Provider**'s dialect can actually recognise, declared by
+implementing `BlockReporter`. It is a **Capability**: absent means the **Provider** reports
+no blocks, and a caller building a fallback chain on one would get a chain that never
+fires. It carries the SET of reasons rather than a yes, because a dialect can commonly read
+one reason and not another, and the set is the only thing the type assertion cannot answer
+by itself.
 
 ### The stream
 

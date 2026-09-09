@@ -292,6 +292,70 @@ type Installer interface {
 	SigningIdentity() string
 }
 
+// BlockReporter is optional: the provider's dialect can recognise that the CLI
+// refused to serve the credential, and say which of the reasons it was.
+//
+// It is a capability because the failure of its absence is silent and expensive.
+// A caller routing around an exhausted subscription cannot tell a provider that
+// never blocks from one whose dialect cannot read a block, and the two look
+// identical right up to the night the window runs out — at which point the run
+// fails as an ordinary bad turn and the fallback that was built for exactly this
+// never fires.
+//
+// It carries the SET of reasons rather than reporting a capability the type
+// assertion already states. A dialect commonly reads one reason and not another:
+// an HTTP status distinguishes a spent allowance from a rejected token, while a
+// CLI that reports only prose can honestly claim neither. A method answering
+// "yes, I detect blocks" would leave a caller building a chain for one specific
+// reason with nothing to check.
+type BlockReporter interface {
+	// DetectableBlocks names the reasons this dialect can recognise. Every
+	// reason it names is one a run CAN come back carrying; a reason absent from
+	// the list will never appear in a Result from this provider.
+	DetectableBlocks() []BlockReason
+}
+
+// BlockReason says why a provider will not serve the credential it was given.
+//
+// The vocabulary is closed and small, and a reason earns a place in it only
+// where the caller's correct response differs. Anything else is an ordinary bad
+// verdict: IsError with no Block, which correctly tells a caller not to route
+// on it.
+type BlockReason string
+
+const (
+	// BlockExhausted means the credential's allowance for the current window is
+	// spent. It lifts on a clock, so a caller may come back to this provider.
+	BlockExhausted BlockReason = "exhausted"
+
+	// BlockRejected means the credential is invalid or expired. It never lifts
+	// on its own: coming back later reaches the same refusal, and a human has
+	// to act.
+	BlockRejected BlockReason = "rejected"
+)
+
+// Block is a provider declining to serve the credential.
+//
+// It is the one bad verdict that is a statement about the CREDENTIAL rather
+// than about the request. Every other one says the run was considered and went
+// badly; a block says the request was never considered at all — which is what
+// makes it the only outcome where trying the same request against a different
+// provider is the right response.
+type Block struct {
+	// Reason is why the provider will not serve the credential.
+	Reason BlockReason
+
+	// ResetsAt is when the allowance returns. Zero means the provider did not
+	// report one, which is NOT a claim that it resets now: a caller with no
+	// timestamp backs off on its own.
+	//
+	// It refines the routing decision and never drives it — Reason already says
+	// whether the block lifts on a clock at all. Absolute rather than a
+	// duration, because a caller that holds a Block in a routing table would
+	// otherwise believe a window reopens as late as the value is old.
+	ResetsAt time.Time
+}
+
 // Descriptor identifies a provider.
 type Descriptor struct {
 	// ID is the stable identifier, e.g. "claude-code".
@@ -420,6 +484,19 @@ type Result struct {
 	// produced no Structured payload, which is the one verdict the library
 	// reaches on its own.
 	IsError bool
+	// Blocked names why the provider declined to serve the credential, or is
+	// nil for a run that was served.
+	//
+	// It is the field a caller routes on, and the only one that distinguishes
+	// "this provider cannot answer for you right now" from "this provider
+	// answered and the answer is that the work failed". IsError is true for
+	// both, and falling back on it would spend a second credential on a task
+	// that was going to fail wherever it ran.
+	//
+	// Nil is not a claim that the run was not blocked — only that nothing said
+	// so in terms this provider can read. A caller that needs to know whether a
+	// provider can speak at all asks BlockReporter before it builds a chain.
+	Blocked *Block
 }
 
 // Usage is the cost of a turn. Zero means the provider did not report it.
