@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}
+{"type":"turn.started"}
+{"type":"error","message":"{\"type\":\"error\",\"status\":429,\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"You've hit your usage limit.\"}}"}
+{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":429,\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"You've hit your usage limit.\"}}"}}
