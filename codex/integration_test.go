@@ -15,6 +15,7 @@ package codex
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -266,5 +267,29 @@ func TestAnUnsatisfiableSchemaIsAVerdictNotAnOutage(t *testing.T) {
 	}
 	if result.Structured != nil {
 		t.Errorf("Structured = %s, want nil", result.Structured)
+	}
+}
+
+// blocked() in parse.go has no field to read a usage-limit refusal from, so it
+// falls back to a literal case-insensitive match against the CLI's own prose.
+// A build that no longer emits this exact phrase silently stops recognising
+// the block: turn.failed still fires, but decoder.blocked returns nil and the
+// run reports a plain error instead of BlockExhausted.
+//
+// This is a static check of the binary's bytes, not a run: it needs no login
+// and produces no verdict, so it belongs beside the tests that drive the CLI
+// without spending anything driving it does.
+func TestTheRealBinaryStillNamesUsageLimit(t *testing.T) {
+	d := integrationDriver(t)
+
+	content, err := os.ReadFile(d.Binary())
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", d.Binary(), err)
+	}
+
+	if !strings.Contains(strings.ToLower(string(content)), "usage limit") {
+		t.Errorf("%s no longer contains the phrase %q; "+
+			"blocked() in codex/parse.go matches it case-insensitively against "+
+			"turn.failed messages and is now stale", d.Binary(), "usage limit")
 	}
 }
