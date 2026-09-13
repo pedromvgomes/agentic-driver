@@ -254,13 +254,15 @@ reasons := driver.DetectableBlocks() // nil means nothing is claimed
 - **claudecode** implements `BlockReporter` and names both reasons. Claude Code reports a
   blocked run the way it reports a rejected token — `subtype: "success"`, `is_error` set,
   and the HTTP status in `api_error_status` — so the status is the whole signal.
-- **codex** does not implement it. Its only event stream is `codex exec --json`, whose
-  terminal `turn.failed` carries a prose message and nothing else, and a dialect that
-  matched that English would recognise exactly the wording it was written against.
+- **codex** implements it and names both reasons too, from less. Its terminal `turn.failed`
+  carries one prose message, so the status is recovered from inside it — the API's own JSON
+  error document, or codex's `unexpected status <code>` — and only when neither is present
+  does a `usage limit` phrase decide. `ResetsAt` is always zero; see
+  [ADR 0007](docs/adr/0007-codex-reads-a-block-out-of-a-prose-message.md).
 
-That asymmetry is the point of the capability. Without it a chain built on codex looks
-identical to one built on claudecode right up to the night a window runs out, when the
-run comes back as an ordinary failed turn and the fallback never fires.
+Ask rather than assume: the two answer alike today and a dialect that cannot read a reason
+looks identical to one that can, right up to the night a window runs out, when the run comes
+back as an ordinary failed turn and the fallback never fires.
 
 The library signals; it does not route. A `Driver` binds one provider at `New`, and a
 `Request` is not portable between dialects — `AllowedTools` and `PermissionMode` are

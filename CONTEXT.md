@@ -96,7 +96,10 @@ A block is a **Verdict** on whichever channel the **Provider** learns it from. "
 credential is spent" is a statement about the request, so reading it as an **Outage** would
 tell a caller "unknown failure, perhaps retry" where the truth is "definitively blocked, go
 elsewhere". A **Provider** reads a block from a wire token — a status code, a typed field —
-and never from a CLI's own prose, which is display copy that changes between releases.
+rather than from a CLI's own prose, which is display copy that changes between releases. A
+dialect whose stream carries no such token anywhere may fall back to a single phrase, and
+only after every wire token has been tried: codex is the one that does, deliberately and
+narrowly, per ADR 0007.
 _Avoid_: rate limit, throttle (both suggest a **Concurrency limit**, which is about
 sharing one credential across simultaneous runs and is not an outcome at all); refusal.
 
