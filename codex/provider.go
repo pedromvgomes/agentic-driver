@@ -574,6 +574,15 @@ func (p *dialect) DenyEnv() []string {
 	return denied
 }
 
+// DetectableBlocks names the reasons this dialect can recognise.
+//
+// Both, because blocked reads them off the same embedded HTTP status: 429 is a
+// spent allowance and 401 a rejected token, and a status decoded from the
+// envelope carries no other verdict this dialect could name.
+func (p *dialect) DetectableBlocks() []agentic.BlockReason {
+	return []agentic.BlockReason{agentic.BlockExhausted, agentic.BlockRejected}
+}
+
 // Compile-time proof of which capabilities each provider claims. Neither
 // implements Resumer nor AgentDefiner nor TurnLimiter: absent capabilities are
 // absent from the type, and the driver answers for them without spawning
@@ -601,6 +610,7 @@ var (
 	_ agentic.SchemaConstrainer  = (*Provider)(nil)
 	_ agentic.ConcurrencyLimiter = (*Provider)(nil)
 	_ agentic.Pinner             = (*Provider)(nil)
+	_ agentic.BlockReporter      = (*Provider)(nil)
 
 	// The same dialect, minus the capability that depends on owning the binary.
 	// A PathProvider that gained a Pinner would be claiming to have chosen a
@@ -611,4 +621,5 @@ var (
 	_ agentic.ModelResolver      = (*PathProvider)(nil)
 	_ agentic.SchemaConstrainer  = (*PathProvider)(nil)
 	_ agentic.ConcurrencyLimiter = (*PathProvider)(nil)
+	_ agentic.BlockReporter      = (*PathProvider)(nil)
 )
