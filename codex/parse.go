@@ -3,6 +3,9 @@ package codex
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
+	"strconv"
+	"strings"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
 )
@@ -46,6 +49,7 @@ type decoder struct {
 	text      string
 	failure   string
 	usage     agentic.Usage
+	blocked   *agentic.Block
 	turns     int
 	isError   bool
 	complete  bool
@@ -113,6 +117,7 @@ func (d *decoder) Decode(line []byte) (agentic.Event, error) {
 		// nil, so a caller can tell a rejected credential from a missing
 		// binary.
 		d.failure = ev.Error.Message
+		d.blocked = blocked(ev.Error.Message)
 		d.isError = true
 		d.complete = true
 		return agentic.Event{}, nil
@@ -176,7 +181,79 @@ func (d *decoder) Result() (agentic.Result, bool) {
 		Usage:   d.usage,
 		Turns:   d.turns,
 		IsError: d.isError || unmet,
+		Blocked: d.blocked,
 	}, true
+}
+
+// statusInProse matches the status codex embeds in the message it prints when a
+// request comes back refused over the wire.
+var statusInProse = regexp.MustCompile(`unexpected status (\d+)`)
+
+// blocked reads a turn.failed message as a block, or nil.
+//
+// Codex has no field for the status: turn.failed carries a single message
+// string, so the status has to be recovered from inside it. It arrives in two
+// forms, tried in this order against codex-cli 0.153.4:
+//
+//  1. The message is the API's own error document, and a top-level `status`
+//     holds the integer.
+//  2. The message is codex's prose about a transport that gave up, and the
+//     status appears in it as "unexpected status 401".
+//
+// A status found either way decides alone, and one this does not model is NOT a
+// block: a 400 for an unsupported model or a malformed schema is a verdict about
+// the REQUEST, and routing the same request to another provider would only reach
+// the same refusal. That is why the prose fallback runs only when neither status
+// form matched — "usage limit" in the explanation of a 400 would otherwise
+// promote a bad request into a spent allowance.
+//
+// Keying on an embedded status and on prose is what claudecode's blocked()
+// deliberately does not do (see docs/adr/0006): it reads a status from a
+// modelled field, so the prose never has to be trusted. This dialect has no such
+// field and no other signal, and docs/adr/0007 sets out why that trade is worth
+// making here.
+//
+// ResetsAt is left zero. The exec stream carries no reset time in any form, and
+// Reason already says whether the block lifts on a clock at all.
+func blocked(message string) *agentic.Block {
+	if status, ok := embeddedStatus(message); ok {
+		switch status {
+		case 429:
+			return &agentic.Block{Reason: agentic.BlockExhausted}
+		case 401:
+			return &agentic.Block{Reason: agentic.BlockRejected}
+		}
+		return nil
+	}
+
+	if strings.Contains(strings.ToLower(message), "usage limit") {
+		return &agentic.Block{Reason: agentic.BlockExhausted}
+	}
+	return nil
+}
+
+// embeddedStatus recovers the HTTP status a turn.failed message carries, and
+// whether it carried one at all.
+//
+// The JSON form is tried first because it is the API speaking: its `status` is
+// the status of the request that was refused. The prose form is codex narrating
+// a connection, which is the only thing it says when the transport never
+// produced a document to quote.
+func embeddedStatus(message string) (int, bool) {
+	var document struct {
+		Status int `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(message), &document); err == nil && document.Status != 0 {
+		return document.Status, true
+	}
+
+	if match := statusInProse.FindStringSubmatch(message); match != nil {
+		status, err := strconv.Atoi(match[1])
+		if err == nil {
+			return status, true
+		}
+	}
+	return 0, false
 }
 
 // constrained reports the schema-conforming answer, and whether a run that
