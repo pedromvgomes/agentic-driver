@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -285,29 +286,97 @@ func containsKind(kinds []agentic.EventKind, want agentic.EventKind) bool {
 	return false
 }
 
-// Codex reads no blocks, and the absence is asserted rather than left implicit.
+// Codex names exactly the two reasons it can read, and no more.
 //
-// Its only event stream is `codex exec --json`, whose terminal `turn.failed`
-// carries the failure as a prose message and nothing else — the error-code
-// vocabulary the CLI keeps internally never reaches the wire. Recognising a
-// spent allowance would mean matching English that is display copy, so the
-// dialect claims neither reason and a caller building a fallback chain can see
-// that before it depends on one.
-func TestCodexClaimsNoBlocksItCannotRead(t *testing.T) {
+// Both come off the HTTP status embedded in a turn.failed message: 429 is a
+// spent allowance and 401 a rejected token. A caller building a fallback chain
+// asks for this list before it depends on one, so claiming a reason the dialect
+// cannot recognise would send it to codex for a block codex never reports.
+func TestCodexClaimsTheBlocksItCanRead(t *testing.T) {
 	var subject agentic.Provider = onPath(t)
-	if _, ok := subject.(agentic.BlockReporter); ok {
-		t.Fatal("codex claims to report blocks, but turn.failed carries only prose")
+	reporter, ok := subject.(agentic.BlockReporter)
+	if !ok {
+		t.Fatal("codex does not report blocks")
+	}
+
+	got := reporter.DetectableBlocks()
+	for _, want := range []agentic.BlockReason{agentic.BlockExhausted, agentic.BlockRejected} {
+		if !slices.Contains(got, want) {
+			t.Errorf("DetectableBlocks() = %v, missing %q", got, want)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("DetectableBlocks() = %v, want only the two reasons a status decides", got)
 	}
 }
 
-// A rejected credential is still a verdict, and still not a block.
-func TestARejectedCredentialIsAVerdictWithNoBlock(t *testing.T) {
+// A rejected credential is a block: the run failed on the token rather than on
+// the task, so the same request sent with another credential can still succeed.
+func TestARejectedCredentialIsABlockedVerdict(t *testing.T) {
 	got, _, _ := fold(t, "rejected-auth.ndjson", agentic.Request{})
 
 	if !got.IsError {
 		t.Error("a rejected credential is not a successful verdict")
 	}
-	if got.Blocked != nil {
-		t.Errorf("Blocked = %+v, want nil from a dialect that reads no blocks", got.Blocked)
+	if got.Blocked == nil {
+		t.Fatal("a rejected credential reports no block")
+	}
+	if got.Blocked.Reason != agentic.BlockRejected {
+		t.Errorf("reason = %q, want %q", got.Blocked.Reason, agentic.BlockRejected)
+	}
+}
+
+// The message says only that a usage limit was reached — no status in any form
+// — and that phrase is the whole of the evidence the stream carries.
+func TestASpentAllowanceNamedOnlyInProseIsABlock(t *testing.T) {
+	got, _, _ := fold(t, "blocked-exhausted.ndjson", agentic.Request{})
+
+	if got.Blocked == nil {
+		t.Fatal("a run refused for a spent allowance reports no block")
+	}
+	if got.Blocked.Reason != agentic.BlockExhausted {
+		t.Errorf("reason = %q, want %q", got.Blocked.Reason, agentic.BlockExhausted)
+	}
+	if !got.IsError {
+		t.Error("a blocked run is not a successful verdict")
+	}
+	// The stream carries no reset time in any form, and inventing one would send
+	// a caller back to a provider that is still blocked.
+	if !got.Blocked.ResetsAt.IsZero() {
+		t.Errorf("ResetsAt = %v, want zero", got.Blocked.ResetsAt)
+	}
+}
+
+// A 429 reaches the message in two shapes — codex's prose about a transport
+// that gave up, and the API's own error document quoted verbatim — and both
+// are the same spent allowance.
+func TestAnEmbeddedStatusIsReadInEitherShape(t *testing.T) {
+	for _, tc := range []struct{ name, fixture string }{
+		{"the transport's prose", "blocked-exhausted-status.ndjson"},
+		{"the API's error document", "blocked-exhausted-json.ndjson"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, _ := fold(t, tc.fixture, agentic.Request{})
+
+			if got.Blocked == nil {
+				t.Fatal("a 429 reports no block")
+			}
+			if got.Blocked.Reason != agentic.BlockExhausted {
+				t.Errorf("reason = %q, want %q", got.Blocked.Reason, agentic.BlockExhausted)
+			}
+		})
+	}
+}
+
+// A status this dialect does not model is a verdict about the REQUEST. Both of
+// these fail on a 400, and reporting either as a block spends a second
+// credential on work that fails wherever it runs.
+func TestAStatusThatIsNotABlockRoutesNowhere(t *testing.T) {
+	for _, name := range []string{"turn-failed-model.ndjson", "structured-invalid-schema.ndjson"} {
+		got, _, _ := fold(t, name, agentic.Request{})
+
+		if got.Blocked != nil {
+			t.Errorf("%s: reports block %+v, want none", name, got.Blocked)
+		}
 	}
 }
