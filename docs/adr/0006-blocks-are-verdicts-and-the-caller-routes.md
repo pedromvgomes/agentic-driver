@@ -1,5 +1,10 @@
 # A block is a verdict about the credential, and the caller routes on it
 
+Status: accepted, narrowed for codex by
+[0007](0007-codex-reads-a-block-out-of-a-prose-message.md). Everything below holds for
+claudecode, which reads a status from a modelled field. Codex has no such field on the only
+stream it emits, and 0007 sets out what it reads instead and why that is worth the trade.
+
 Every bad outcome this library reports is a statement about the request: the agent failed
 the task, the sandbox forbade an action, the schema went unsatisfied. One class is not. When
 a subscription window is spent or a credential is rejected, the request was never considered
@@ -55,19 +60,21 @@ thing the assertion cannot answer by itself.
 A caller that wants to route asks `DetectableBlocks` before it builds a chain, because
 the two providers answer differently and the difference is not incidental. Claude Code
 reports a blocked run the way it reports a rejected token — `subtype: "success"`,
-`is_error` set, and the HTTP status in `api_error_status` — so a status is the whole
-signal and both reasons are readable. Codex's only event stream is `codex exec --json`,
-whose terminal `turn.failed` carries a prose message and nothing else; the error-code
-vocabulary the CLI keeps internally never reaches the wire, so codex implements
-`BlockReporter` not at all and a chain that depends on it would never fire. That absence
-is the capability doing its job, and it is asserted by a test rather than left to be
-noticed.
+`is_error` set, and the HTTP status in `api_error_status` — so a status read from a
+modelled field is the whole signal and both reasons are readable. Codex's only event
+stream is `codex exec --json`, whose terminal `turn.failed` carries a prose message and
+nothing else; the error-code vocabulary the CLI keeps internally never reaches the wire
+as a field, so codex has no status to read and instead recovers one from that prose, per
+[0007](0007-codex-reads-a-block-out-of-a-prose-message.md). `DetectableBlocks` is how a
+caller finds out which of the two it is dealing with before it builds a chain on top of
+either.
 
-Recognition keys on a wire token — a status code — and never on display prose, which is
-localised and rewritten between releases. The rule is what makes the vocabulary
-extensible without becoming a substring hunt, and it is also what rules codex out today:
-a dialect that matched the English in `error.message` would recognise exactly the wording
-it was written against.
+Recognition keys on a wire token — a status code — rather than on display prose, which is
+localised and rewritten between releases. The rule is what keeps the vocabulary
+extensible without becoming a substring hunt: a dialect that matched the English in
+`error.message` wholesale would recognise exactly the wording it was written against.
+[0007](0007-codex-reads-a-block-out-of-a-prose-message.md) is the one narrow exception,
+confined to a single phrase tried only after every wire token has failed to match.
 
 Evidence for a reason may come from the pinned artifact rather than a captured run, since
 producing an exhausted run on demand means genuinely spending a subscription window.
