@@ -1,0 +1,12 @@
+# This repository's answer to gitleaks, which lydite's scan discovers at the
+# repository root.
+#
+# Every entry names a rule and a path and says why.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "the fingerprint of Anthropic's public release-signing key, which the installer checks a manifest's signature against; it identifies a public key and grants nothing"
+targetRules = ["generic-api-key"]
+paths = ['''^claudecode/release\.go$''']
