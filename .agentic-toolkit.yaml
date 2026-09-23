@@ -1,2 +1,13 @@
-extends:
-  - github.com/wardnet/agentic-stacks/wardnet.yaml@main
+platforms: [claude, codex]
+memory:
+  root: .memory
+  agent: claudecode
+stacks:
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/default.yaml
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/plannotator.yaml
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/serena.yaml
+  - github.com/pedromvgomes/agentic-toolkit.git/stacks/rtk.yaml
+
+# Repo definitions (we use default ./agentic root, so all definitions there
+# are picked automatically)
+context: ./agentic/agentic-driver-repo.md

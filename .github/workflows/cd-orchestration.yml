@@ -40,7 +40,7 @@ jobs:
   # that CI ran: a re-run would only say the code passes now, on a runner,
   # again — this says this exact tree passed the full gate.
   verify-attestation:
-    uses: pedromvgomes/gt/.github/workflows/reusable-attest.yml@v1
+    uses: pedromvgomes/gt/.github/workflows/reusable-attest.yml@v2
     with:
       require: true
     # Must cover everything reusable-attest declares; a caller granting less

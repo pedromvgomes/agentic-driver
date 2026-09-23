@@ -32,10 +32,18 @@ go.work.sum
 # .vscode/
 
 # Agentic-toolkit generated outputs — rendered from .agentic-toolkit.yaml (and
-# the stacks it extends) on every toolkit sync. The config and lockfile are
+# the stacks it composes) on every toolkit sync. The config and lockfile are
 # committed; these regenerate, so they are never committed. Anchored to the
 # repo root so intentionally tracked CLAUDE.md files in subdirectories are
 # unaffected.
 /.claude/
 /CLAUDE.md
 /.mcp.json
+/.agents/
+/AGENTS.md
+/.codex/
+
+# Reports lydite writes into the repository it measures: the log per check, the
+# coverage report, and the document the pull-request comment is rendered from.
+# Committed, they would become part of what lydite measures.
+/.lydite-reports/
