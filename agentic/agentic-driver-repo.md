@@ -37,7 +37,7 @@ have a different everyday meaning that is deliberately avoided here.
 ## Git workflow
 
 - Conventional commits (`feat:`, `fix:`, `docs:`, `test:`, ...), scoped to the package touched, e.g. `feat(codex): ...`.
-- A release is an annotated tag on `main`; the tag message's subject is the version and everything after it is the release notes (see README.md "Releasing").
+- A release is an annotated tag on `main`; the tag message's subject is the version and everything after it is the release notes. The notes are committed first as `docs/releases/<version>.md` in the pull request that makes the release, and the tag body is cut from that file (see README.md "Releasing").
 
 ## Boundaries
 

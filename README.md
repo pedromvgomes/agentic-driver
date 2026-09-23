@@ -328,6 +328,16 @@ Breaking, for anyone implementing Provider:
   - ...
 ```
 
+The body is written ahead of the tag, in `docs/releases/<version>.md`, and lands
+through the same pull request as the changes it describes, so the notes are
+reviewed with them. Once that pull request is on `main`, the tag is cut from the
+file:
+
+```sh
+{ echo v0.9.0; echo; cat docs/releases/v0.9.0.md; } | git tag -a v0.9.0 -F - <merge commit>
+git push origin v0.9.0
+```
+
 A lightweight tag, or an annotation with nothing after its subject line, fails
 the publish stage rather than producing a release with no notes. Delivery also
 refuses a tree that never passed `ci-gate`, so a tag on unvalidated code does
