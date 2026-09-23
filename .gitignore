@@ -39,3 +39,6 @@ go.work.sum
 /.claude/
 /CLAUDE.md
 /.mcp.json
+/.agents/
+/AGENTS.md
+/.codex/
