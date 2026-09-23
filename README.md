@@ -105,7 +105,7 @@ its own vendor's family names:
 
 | claudecode alias | resolves to |
 | --- | --- |
-| `opus` | `claude-opus-5` |
+| `opus` | `claude-opus-5-5` |
 | `sonnet` | `claude-sonnet-5` |
 | `haiku` | `claude-haiku-4-5` |
 | `fable` | `claude-fable-5-1` |
@@ -125,7 +125,9 @@ and one that would silently answer a provider swap with a model nobody chose. A
 caller that wants the same model everywhere names it concretely.
 
 Anything else is passed through untouched, so a concrete ID works and so does a
-family newer than this library.
+family newer than this library. An alias always means the newest build, so a
+caller that has to stay on an earlier one names it: `claude-opus-5` reaches
+Opus 5 while `opus` resolves to Opus 5.5.
 
 `Result.Model` reports which model actually answered, which is not necessarily
 the one that was asked for — and is what the cost beside it in `Usage` was
@@ -133,7 +135,7 @@ charged against.
 
 ```go
 driver, _ := agentic.New(provider, agentic.WithModel("opus"))
-driver.Model()                     // "claude-opus-5"
+driver.Model()                     // "claude-opus-5-5"
 result, _ := driver.Run(ctx, req)
 result.Model                       // what answered
 ```

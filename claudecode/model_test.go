@@ -13,7 +13,7 @@ func TestAFamilyAliasResolvesToAConcreteModel(t *testing.T) {
 	p := testProvider(t)
 
 	for alias, want := range map[string]string{
-		"opus":   "claude-opus-5",
+		"opus":   "claude-opus-5-5",
 		"sonnet": "claude-sonnet-5",
 		"haiku":  "claude-haiku-4-5",
 		"fable":  "claude-fable-5-1",
@@ -33,6 +33,20 @@ func TestAnUnknownModelIsPassedThroughUntouched(t *testing.T) {
 		if got := p.ResolveModel(name); got != name {
 			t.Errorf("ResolveModel(%q) = %q, want it unchanged", name, got)
 		}
+	}
+}
+
+// The alias follows the newest build, so a caller that has to stay on an earlier
+// one names it concretely, and that name has to reach the CLI as written rather
+// than being folded back into the family.
+func TestAnEarlierBuildInAFamilyStaysReachableByItsConcreteID(t *testing.T) {
+	p := testProvider(t)
+
+	if got := p.ResolveModel("claude-opus-5"); got != "claude-opus-5" {
+		t.Errorf("ResolveModel(%q) = %q, want it unchanged", "claude-opus-5", got)
+	}
+	if p.ResolveModel("opus") == "claude-opus-5" {
+		t.Error(`"opus" resolves to claude-opus-5, want the newest Opus build`)
 	}
 }
 

@@ -20,7 +20,7 @@ func ExamplePathProvider_ResolveModel() {
 	fmt.Println(provider.ResolveModel("haiku"))
 	fmt.Println(provider.ResolveModel("claude-opus-4-8"))
 	// Output:
-	// claude-opus-5
+	// claude-opus-5-5
 	// claude-haiku-4-5
 	// claude-opus-4-8
 }
