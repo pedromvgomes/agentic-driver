@@ -20,7 +20,7 @@ const ID = "claude-code"
 //
 // The envelope schema and the flag spelling below are properties of a specific
 // release, so a silent self-update is a silent break. It lives here, once.
-const PinnedVersion = "2.1.258"
+const PinnedVersion = "2.1.280"
 
 // dialect is everything about talking to Claude Code that does not depend on
 // where the binary came from: the flags, the envelope, and the environment.
