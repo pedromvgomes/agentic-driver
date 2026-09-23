@@ -1,0 +1,10 @@
+# What lydite builds, tests and scans in this repository.
+#
+# One component, because there is one Go module, rooted at the repository root.
+# The integration suite sits behind the `integration` build tag and drives real
+# CLIs, so the plain `./...` here leaves it out.
+components:
+  - name: agentic-driver
+    dir: .
+    runner: go-test
+    args: ["-race", "./..."]
