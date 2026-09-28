@@ -188,7 +188,7 @@ func (f *Fake) Recorded(t *testing.T) Invocation {
 // prompt's content can never be mistaken for an argument or an environment
 // variable.
 func (f *Fake) Stdin(t *testing.T) string {
-	t.Helper()
+	t.Helper() // [lydite:exclude_from_mutation][only attributes a failure to the caller's line; no assertion can observe its removal]
 
 	raw, err := os.ReadFile(f.stdinPath)
 	if err != nil {
