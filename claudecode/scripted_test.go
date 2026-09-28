@@ -260,3 +260,65 @@ func TestTheSettingsRefusalStaysFirstInArgv(t *testing.T) {
 		t.Fatalf("argv = %q, want it to open with --setting-sources ''", inv.Args)
 	}
 }
+
+// DisallowedTools closes what AllowedTools cannot: a tool that needs no
+// permission is invisible to an allowlist, so the denial has to be argv of
+// its own rather than piggyback on --allowedTools.
+func TestADenialSurvivesRefusingToLoadSettings(t *testing.T) {
+	inv := build(t, agentic.Request{
+		Prompt:          "curate",
+		DisallowedTools: []string{"Agent", "Task"},
+	})
+
+	if tools, _ := flagValue(inv.Args, "--disallowedTools"); tools != "Agent,Task" {
+		t.Errorf("--disallowedTools = %q", tools)
+	}
+}
+
+// A deny-list asking for every tool to be denied is a coherent request, unlike
+// an allowlist of "*" which would grant everything and defeat the point of
+// naming an allowlist at all.
+func TestABareWildcardIsAcceptedOnlyAsADenial(t *testing.T) {
+	inv := build(t, agentic.Request{
+		Prompt:          "hi",
+		DisallowedTools: []string{"*"},
+	})
+
+	if tools, _ := flagValue(inv.Args, "--disallowedTools"); tools != "*" {
+		t.Errorf("--disallowedTools = %q", tools)
+	}
+}
+
+// The same misreading that widens an allowlist widens a deny-list too: a
+// pattern the CLI would split or read as more than it says has to be refused
+// before any process starts, not just when it appears in AllowedTools.
+func TestADenialEntryTheCLIWouldReadAsWiderIsRefused(t *testing.T) {
+	for name, tool := range map[string]string{
+		"space before parens": "Bash (agtk memory anchor*)",
+		"two grants in one":   "Read Write",
+		"trailing text":       "Bash(git status) Edit",
+		"unbalanced":          "Bash(agtk memory",
+		"blank":               "  ",
+		"embedded comma":      "Read,Write",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := testProvider(t).StreamCommand(agentic.Request{
+				Prompt:          "hi",
+				DisallowedTools: []string{"Agent", tool},
+			})
+			if !errors.Is(err, agentic.ErrInvalidRequest) {
+				t.Fatalf("Command accepted %q: error = %v, want ErrInvalidRequest", tool, err)
+			}
+		})
+	}
+}
+
+// A field left zero is a flag left off, so the CLI's own default of denying
+// nothing applies.
+func TestNoDisallowedToolsFlagAppearsWhenNothingIsDenied(t *testing.T) {
+	inv := build(t, agentic.Request{Prompt: "hi"})
+
+	if slices.Contains(inv.Args, "--disallowedTools") {
+		t.Errorf("argv = %q, want no --disallowedTools", inv.Args)
+	}
+}
