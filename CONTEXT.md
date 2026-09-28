@@ -29,7 +29,9 @@ CLI holds its login and not a rate a caller tunes.
 _Avoid_: rate limit, throttle, parallelism setting (all three suggest a knob about speed).
 
 **Invocation**:
-The argv after the executable plus the non-secret environment the dialect requires.
+The argv after the executable, the non-secret environment the dialect requires, and
+whatever the dialect writes to the child's stdin — the prompt, so that a request carrying a
+full diff is not a single argv element large enough to fail at exec.
 
 **Schema**:
 A JSON Schema the final answer must conform to, and always a JSON object — a document that
