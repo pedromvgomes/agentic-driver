@@ -1,9 +1,11 @@
 package agentic_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +28,7 @@ type stub struct {
 	auth     map[string]string
 	deny     []string
 	parseErr error
+	stdin    []byte
 }
 
 func (s *stub) Descriptor() agentic.Descriptor {
@@ -36,7 +39,7 @@ func (s *stub) StreamCommand(req agentic.Request) (agentic.Invocation, error) {
 	if req.Prompt == "" {
 		return agentic.Invocation{}, errors.New("stub: no prompt")
 	}
-	return agentic.Invocation{Args: append([]string{"--prompt", req.Prompt}, s.args...), Env: s.env}, nil
+	return agentic.Invocation{Args: append([]string{"--prompt", req.Prompt}, s.args...), Env: s.env, Stdin: s.stdin}, nil
 }
 
 func (s *stub) NewDecoder(agentic.Request) agentic.Decoder { return &stubDecoder{stub: s} }
@@ -277,6 +280,109 @@ func alive(t *testing.T, pid int) bool {
 			return true
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// stdinGrace mirrors the driver's killGrace: how long Wait holds out for the
+// pipes once the child has exited or been killed. A run that ends near it was
+// released by the grace, not by the pipes closing.
+const stdinGrace = 5 * time.Second
+
+// stdinPayload is larger than both the 128 KiB a single Linux argv element may
+// hold and the 64 KiB a pipe buffers, so it cannot be delivered by either
+// route that would hide a mistake: it cannot fit in argv, and it cannot be
+// written in one go before the child reads.
+func stdinPayload() []byte {
+	var b bytes.Buffer
+	for i := 0; b.Len() < 1<<20; i++ {
+		fmt.Fprintf(&b, "line %d arg:not-an-argument ENV\n", i)
+	}
+	return b.Bytes()
+}
+
+func TestAProviderStdinReachesTheChild(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	payload := stdinPayload()
+	d := driver(t, &stub{stdin: payload}, fake)
+
+	if _, err := d.Run(t.Context(), agentic.Request{Prompt: "hi"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := fake.Stdin(t); got != string(payload) {
+		t.Errorf("the child read %d bytes of stdin, want the %d-byte payload verbatim", len(got), len(payload))
+	}
+	if got, want := fake.Recorded(t).Args, []string{"--prompt", "hi"}; !slices.Equal(got, want) {
+		t.Errorf("argv = %q, want %q with nothing from stdin in it", got, want)
+	}
+}
+
+// A nil Stdin leaves the child on the null device: a CLI that reads stdin when
+// it is not a terminal sees an immediate EOF rather than whatever the caller's
+// own stdin holds.
+func TestNoProviderStdinGivesTheChildNone(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	if _, err := d.Run(t.Context(), agentic.Request{Prompt: "hi"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := fake.Stdin(t); got != "" {
+		t.Errorf("the child read %q from stdin, want nothing", got)
+	}
+}
+
+// A CLI may answer without reading all of its input — a usage error does. The
+// write of the rest then fails against a closed pipe, and that failure is the
+// driver's own business, not the run's.
+//
+// The elapsed time is the assertion that matters. A complete result outranks a
+// wait error, so a stdin copy left blocked until the grace expired would still
+// come back as this same success, just stdinGrace late.
+func TestAChildThatIgnoresStdinStillFinishes(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope, IgnoreStdin: true}).Build(t)
+	d := driver(t, &stub{stdin: stdinPayload()}, fake)
+
+	start := time.Now()
+	got, err := d.Run(t.Context(), agentic.Request{Prompt: "hi"})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Run: %v, want the unread remainder of stdin not to fail the run", err)
+	}
+	if got.Text != "ok" {
+		t.Errorf("Result = %+v, want the parsed envelope", got)
+	}
+	if elapsed >= stdinGrace {
+		t.Errorf("Run took %s, want the unread stdin released when the child exits rather than held to the %s grace", elapsed, stdinGrace)
+	}
+}
+
+// A hung CLI that never read its input leaves the driver mid-write. The
+// timeout still has to end the run, and promptly: killing the group closes the
+// pipe, and a pending write that outlived the kill would hold Wait open until
+// the grace ran out.
+func TestATimeoutKillsAChildStillOwedStdin(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope, SleepSeconds: 30, SpawnChild: true, IgnoreStdin: true}).Build(t)
+	d := driver(t, &stub{stdin: stdinPayload()}, fake, agentic.WithTimeout(300*time.Millisecond))
+
+	start := time.Now()
+	_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi"})
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, agentic.ErrProviderUnavailable) || !strings.Contains(err.Error(), "did not finish within") {
+		t.Fatalf("error = %v, want a timeout", err)
+	}
+	if elapsed >= stdinGrace {
+		t.Errorf("Run took %s, want the kill to release the pending stdin write rather than the %s grace", elapsed, stdinGrace)
+	}
+
+	pid := fake.ChildPID(t)
+	if pid == 0 {
+		t.Fatal("the fake never recorded the child it spawned")
+	}
+	if alive(t, pid) {
+		t.Errorf("the process the CLI spawned (pid %d) outlived the cancelled run", pid)
 	}
 }
 

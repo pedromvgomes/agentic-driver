@@ -40,6 +40,10 @@ type Fake struct {
 	// cancellation can be checked to reach the whole process group rather than
 	// just the process the driver started.
 	SpawnChild bool
+	// IgnoreStdin makes the fake never read its standard input, for testing a
+	// child that exits or stalls while the driver still has a payload to
+	// write. Stdin fails the test under it, since nothing was captured.
+	IgnoreStdin bool
 
 	dir        string
 	path       string
@@ -72,7 +76,9 @@ func (f *Fake) Build(t *testing.T) *Fake {
 	// would corrupt the line-based parser Recorded uses. cat is one of the
 	// handful of coreutils minimalPath guarantees, so this survives under an
 	// isolated child's PATH too.
-	body.WriteString("cat > " + shellQuote(f.stdinPath) + "\n")
+	if !f.IgnoreStdin {
+		body.WriteString("cat > " + shellQuote(f.stdinPath) + "\n")
+	}
 	body.WriteString(record(f.recordPath))
 
 	if f.SpawnChild {

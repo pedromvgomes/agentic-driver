@@ -436,6 +436,11 @@ type Invocation struct {
 	// than a TUI being watched. It applies in both credential modes, because
 	// it is dialect, not credentials.
 	Env map[string]string
+	// Stdin is piped to the child's standard input, or is nil to leave it on
+	// the null device. A payload travels here rather than in Args because the
+	// kernel caps a single argument (128 KiB on Linux), and a prompt carrying
+	// a whole diff exceeds that and fails at exec.
+	Stdin []byte
 }
 
 // Result is deliberately thin: what did it say, and what did it cost. A
