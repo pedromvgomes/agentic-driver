@@ -23,7 +23,7 @@ have a different everyday meaning that is deliberately avoided here.
 
 - Root package (`agentic-driver`) — the `Driver`, `Provider` interface, `Request`/`Result`/`Event`, environment and process handling. Identical for every provider.
 - `claudecode/` — the Claude Code CLI dialect. Complete: implements every optional capability interface it can (`Pinner`, `Installer`, `ModelResolver`, `SchemaConstrainer`, `BlockReporter`, ...).
-- `codex/` — the Codex CLI dialect. `codex.New` vendors a pinned binary on darwin/linux; `codex.NewOnPath` runs whichever is on PATH (Windows always uses this). Declares no `TurnLimiter`, `AgentDefiner`, or `Installer`; `PermissionArgs` refuses `AllowedTools` outright.
+- `codex/` — the Codex CLI dialect. `codex.New` vendors a pinned binary on darwin/linux; `codex.NewOnPath` runs whichever is on PATH (Windows always uses this). Declares no `TurnLimiter`, `AgentDefiner`, `Installer`, or `Disallower` (codex's nearest analogue, `features.multi_agent`, is a single switch over five tools at once, not a per-tool control); `PermissionArgs` refuses `AllowedTools` outright.
 - `agentictest/` — a scripted fake binary used by unit tests to assert argv, environment, stdin, and working directory without spawning a real CLI.
 - `docs/adr/` — architecture decision records. Read the relevant ADR before changing behavior it governs; each one records the rejected alternative, which is the reasoning a diff alone won't show.
 

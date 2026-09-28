@@ -94,6 +94,9 @@ func TestAbsentCapabilitiesAreAbsentFromTheType(t *testing.T) {
 	if _, ok := p.(agentic.TurnLimiter); ok {
 		t.Error("codex implements TurnLimiter, but it has no configuration field for a turn bound")
 	}
+	if _, ok := p.(agentic.Disallower); ok {
+		t.Error("codex implements Disallower, but its nearest analogue is a single switch over five tools, not a per-tool control")
+	}
 }
 
 // The honest outcome: codex constrains a run by sandbox, not by tool. Its

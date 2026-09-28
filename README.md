@@ -349,9 +349,11 @@ Early. The API is not stable. `claudecode` is complete. `codex` drives
 single-turn runs: `StreamCommand`, the decoder, `PermissionArgs`, `SchemaArgs`,
 `AuthEnv` and `DenyEnv` are written against captured output from the real CLI,
 at the version `codex.New` pins. It declares no `TurnLimiter` (codex has no turn
-bound), no `AgentDefiner` and no `Installer`, and its `PermissionArgs` refuses
-`AllowedTools` outright — codex has no per-tool allowlist, and accepting one
-could only mean discarding it. `codex.New` vendors on darwin and linux;
+bound), no `AgentDefiner`, no `Installer` and no `Disallower` (codex's nearest
+analogue, `features.multi_agent`, is a single switch over five tools at once,
+not a per-tool control), and its `PermissionArgs` refuses `AllowedTools`
+outright — codex has no per-tool allowlist, and accepting one could only mean
+discarding it. `codex.New` vendors on darwin and linux;
 Windows uses `codex.NewOnPath`.
 
 ## License
