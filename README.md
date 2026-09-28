@@ -299,6 +299,20 @@ The answer is the provider's and does not change with the credential mode.
 a driver claiming "isolated, therefore unbounded" would be answering for a
 profile it cannot see.
 
+`DetectableBlocks` and `MaxConcurrentRuns` exist because those two capabilities
+are worth asking about often enough to earn a convenience accessor; most are
+not. `Driver.Provider()` returns the underlying `Provider` for any of the
+rest — `Permitter`, `AgentDefiner`, `Resumer`, `TurnLimiter`, `Disallower`, or
+one not yet invented — so a caller can type-assert it directly, without
+holding on to its own reference to the concrete provider passed to
+`agentic.New` or submitting a `Request` just to read the refusal back:
+
+```go
+if _, ok := driver.Provider().(agentic.Disallower); ok {
+    // this provider can apply Request.DisallowedTools
+}
+```
+
 ## Testing
 
 Three layers, and only the third costs money:
