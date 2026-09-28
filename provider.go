@@ -176,6 +176,24 @@ type Permitter interface {
 	PermissionArgs(mode string, allowedTools []string) ([]string, error)
 }
 
+// Disallower is optional: the provider can name tools a scripted run must
+// never be able to use, regardless of what AllowedTools or PermissionMode
+// otherwise grant.
+//
+// Separate from Permitter because an allowlist alone cannot close this gap: a
+// tool that needs no permission is invisible to it, so removing one from the
+// run needs its own vocabulary. A provider may grant an allowlist without
+// being able to remove anything from it, or the reverse, and folding this
+// into PermissionArgs would force every existing implementer to change its
+// signature to accommodate a capability some of them don't have.
+type Disallower interface {
+	// DisallowArgs returns the arguments that remove tools from what the run
+	// may use. It returns ErrInvalidRequest for a deny-list this CLI cannot
+	// express, so a provider with no per-tool vocabulary refuses the request
+	// outright rather than silently honouring part of the list.
+	DisallowArgs(tools []string) ([]string, error)
+}
+
 // Agent is one entry in a Request's roster.
 //
 // Deliberately two fields. Both are documented by the CLIs this drives; a
@@ -406,6 +424,14 @@ type Request struct {
 	// provider does not reconcile them: which modes exist, and what each one
 	// overrides, is dialect.
 	PermissionMode string
+	// DisallowedTools names tools the child process must not be able to use,
+	// regardless of what AllowedTools or PermissionMode otherwise grant. It
+	// requires a Disallower.
+	//
+	// A tool that needs no permission is invisible to AllowedTools, so an
+	// allowlist alone cannot close it off — DisallowedTools is the field that
+	// reaches it.
+	DisallowedTools []string
 	// WorkDir is the working directory of the child process, or empty for the
 	// parent's.
 	WorkDir string
