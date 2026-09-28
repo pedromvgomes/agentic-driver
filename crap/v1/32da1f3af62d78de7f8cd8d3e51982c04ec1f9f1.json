@@ -1,0 +1,7 @@
+{
+  "agentic-driver": {
+    "above": 0,
+    "worst": 27.232,
+    "producer": "go 1.26.6"
+  }
+}
