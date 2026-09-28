@@ -176,6 +176,10 @@ func (p *dialect) baseArgs() []string {
 
 // StreamCommand renders a Request as `claude -p`.
 //
+// The prompt goes on stdin, which `claude -p` reads when no prompt argument
+// follows it. As an argument it would be a single argv element, which Linux
+// caps at 128 KiB: a prompt embedding a large diff fails to exec with E2BIG.
+//
 // --verbose is not optional: without it the CLI collapses stream-json down to
 // the single terminal envelope, and every intermediate event a caller asked to
 // watch is lost.
@@ -188,8 +192,12 @@ func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error)
 	if err != nil {
 		return agentic.Invocation{}, err
 	}
-	args := append(p.baseArgs(), "-p", req.Prompt, "--output-format", "stream-json", "--verbose")
-	return agentic.Invocation{Args: append(args, common...), Env: p.dialectEnv()}, nil
+	args := append(p.baseArgs(), "-p", "--output-format", "stream-json", "--verbose")
+	return agentic.Invocation{
+		Args:  append(args, common...),
+		Env:   p.dialectEnv(),
+		Stdin: []byte(req.Prompt),
+	}, nil
 }
 
 // commonArgs renders the optional parts of a Request. A field left zero is a

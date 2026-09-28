@@ -47,7 +47,7 @@ func (d *Driver) Stream(ctx context.Context, req Request) (iter.Seq2[Event, erro
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
-		cmd := d.command(ctx, inv.Args, env, req.WorkDir)
+		cmd := d.command(ctx, inv, env, req.WorkDir)
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {

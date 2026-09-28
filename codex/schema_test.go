@@ -299,18 +299,14 @@ func TestDifferentSchemasGetDifferentFiles(t *testing.T) {
 	}
 }
 
-// The flag precedes the prompt, which is positional and last, so nothing the
-// prompt contains can be read as a flag.
-func TestStreamCommandCarriesTheSchemaBeforeThePrompt(t *testing.T) {
+func TestStreamCommandCarriesTheSchemaFlag(t *testing.T) {
 	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "review this", Schema: schema})
 	if err != nil {
 		t.Fatalf("StreamCommand: %v", err)
 	}
 
-	flag := slices.Index(inv.Args, "--output-schema")
-	prompt := slices.Index(inv.Args, "review this")
-	if flag < 0 || prompt < 0 || flag > prompt {
-		t.Errorf("argv = %q, want --output-schema before the positional prompt", inv.Args)
+	if !slices.Contains(inv.Args, "--output-schema") {
+		t.Errorf("argv = %q, want --output-schema", inv.Args)
 	}
 }
 

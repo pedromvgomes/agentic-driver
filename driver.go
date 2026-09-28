@@ -1,6 +1,7 @@
 package agentic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -424,13 +425,23 @@ func (d *Driver) invocation(req Request) (Request, Invocation, error) {
 
 // command builds the child process. This is the only place in the library an
 // *exec.Cmd is constructed.
-func (d *Driver) command(ctx context.Context, args, env []string, workDir string) *exec.Cmd {
+func (d *Driver) command(ctx context.Context, inv Invocation, env []string, workDir string) *exec.Cmd {
 	// The binary is an absolute path, resolved once at New. No PATH lookup is
 	// left to win.
 	//
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd := exec.CommandContext(ctx, d.binary, args...) // #nosec G204 -- d.binary is resolved at construction and args come from the provider's own Command
+	cmd := exec.CommandContext(ctx, d.binary, inv.Args...) // #nosec G204 -- d.binary is resolved at construction and args come from the provider's own Command
 	cmd.Env = env
+
+	// A reader rather than a file, so exec copies it through a pipe on a
+	// goroutine of its own. A child that exits or is killed without reading
+	// it closes the pipe, and the failed write is not reported. A descendant
+	// that inherited stdin and outlives the child keeps the copy blocked on a
+	// full pipe; WaitDelay below is what bounds that, the same way it bounds
+	// stdout.
+	if inv.Stdin != nil {
+		cmd.Stdin = bytes.NewReader(inv.Stdin)
+	}
 
 	cmd.Dir = workDir
 	if cmd.Dir == "" {

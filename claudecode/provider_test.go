@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	agentic "github.com/pedromvgomes/agentic-driver"
+	"github.com/pedromvgomes/agentic-driver/agentictest"
 )
 
 func TestTheDescriptorNamesTheProviderAndItsBinary(t *testing.T) {
@@ -75,6 +76,37 @@ func TestAConfigDirectoryRedirectsTheCLIsOwnState(t *testing.T) {
 	}
 	if inv.Env["HOME"] != dir {
 		t.Errorf("HOME = %q, want the nominated config directory so caches land inside it", inv.Env["HOME"])
+	}
+}
+
+// Linux caps a single argv element at 128 KiB, and a prompt embedding a whole
+// diff routinely exceeds it. The run goes through a real exec, because an
+// Invocation inspected without spawning anything cannot fail at execve(2).
+func TestAPromptLargerThanAnArgvElementReachesTheCLIOnStdin(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: string(golden(t, "stream.ndjson"))}).Build(t)
+
+	d, err := agentic.New(testProvider(t), agentic.WithBinary(fake.Path()))
+	if err != nil {
+		t.Fatalf("agentic.New: %v", err)
+	}
+
+	const marker = "diff --git a/prompt b/prompt\n"
+	prompt := strings.Repeat(marker, 200*1024/len(marker)+1)
+	if _, err := d.Run(t.Context(), agentic.Request{Prompt: prompt}); err != nil {
+		t.Fatalf("Run with a %d-byte prompt: %v", len(prompt), err)
+	}
+
+	if got := fake.Stdin(t); got != prompt {
+		t.Errorf("stdin carried %d bytes, want the %d-byte prompt verbatim", len(got), len(prompt))
+	}
+	args := fake.Recorded(t).Args
+	if !slices.Contains(args, "-p") {
+		t.Errorf("argv = %q, want -p so the CLI runs non-interactively", args)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "diff --git") {
+			t.Errorf("argv carries the prompt, which fails to exec once it outgrows one argument: %.80q", arg)
+		}
 	}
 }
 

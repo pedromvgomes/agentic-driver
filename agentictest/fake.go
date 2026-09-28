@@ -5,10 +5,10 @@
 // tests can use the same fake, the way net/http/httptest is importable.
 // Importing "testing" here is deliberate.
 //
-// The fake records its own argv, environment and working directory before
-// answering. That is what makes the process policy testable: how a child is
-// built is a set of statements about the child, and the only way to check them
-// is to ask it.
+// The fake records its own argv, environment, working directory and stdin
+// before answering. That is what makes the process policy testable: how a
+// child is built is a set of statements about the child, and the only way to
+// check them is to ask it.
 package agentictest
 
 import (
@@ -40,10 +40,15 @@ type Fake struct {
 	// cancellation can be checked to reach the whole process group rather than
 	// just the process the driver started.
 	SpawnChild bool
+	// IgnoreStdin makes the fake never read its standard input, for testing a
+	// child that exits or stalls while the driver still has a payload to
+	// write. Stdin fails the test under it, since nothing was captured.
+	IgnoreStdin bool
 
 	dir        string
 	path       string
 	recordPath string
+	stdinPath  string
 	childPath  string
 }
 
@@ -59,12 +64,21 @@ func (f *Fake) Build(t *testing.T) *Fake {
 	f.dir = t.TempDir()
 	f.path = filepath.Join(f.dir, "fake-agent")
 	f.recordPath = filepath.Join(f.dir, "invocation.json")
+	f.stdinPath = filepath.Join(f.dir, "stdin")
 	f.childPath = filepath.Join(f.dir, "child.pid")
 
 	var body strings.Builder
 	body.WriteString("#!/bin/sh\n")
 	// The warm-up path, first and cheap. See warm below for why it exists.
 	body.WriteString("if [ \"$1\" = " + shellQuote(warmupArg) + " ]; then exit 0; fi\n")
+	// Captured to its own file rather than folded into record(): a prompt can
+	// contain newlines or a line starting with "arg:" or "ENV", either of which
+	// would corrupt the line-based parser Recorded uses. cat is one of the
+	// handful of coreutils minimalPath guarantees, so this survives under an
+	// isolated child's PATH too.
+	if !f.IgnoreStdin {
+		body.WriteString("cat > " + shellQuote(f.stdinPath) + "\n")
+	}
 	body.WriteString(record(f.recordPath))
 
 	if f.SpawnChild {
@@ -167,6 +181,20 @@ func (f *Fake) Recorded(t *testing.T) Invocation {
 		}
 	}
 	return inv
+}
+
+// Stdin returns what was piped to the fake's standard input, failing the test
+// if the fake was never run. It is captured separately from Recorded so a
+// prompt's content can never be mistaken for an argument or an environment
+// variable.
+func (f *Fake) Stdin(t *testing.T) string {
+	t.Helper() // [lydite:exclude_from_mutation][only attributes a failure to the caller's line; no assertion can observe its removal]
+
+	raw, err := os.ReadFile(f.stdinPath)
+	if err != nil {
+		t.Fatalf("the fake agent was never invoked: %v", err)
+	}
+	return string(raw)
 }
 
 // Ran reports whether the fake was invoked at all, for the cases where not

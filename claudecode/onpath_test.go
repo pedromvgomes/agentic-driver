@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -103,6 +104,9 @@ func TestBothProvidersSpeakTheSameDialect(t *testing.T) {
 		if a.Args[i] != b.Args[i] {
 			t.Errorf("argv differs at %d: %q vs %q", i, a.Args[i], b.Args[i])
 		}
+	}
+	if !bytes.Equal(a.Stdin, b.Stdin) {
+		t.Errorf("stdin differs between providers:\nvendored = %q\non path  = %q", a.Stdin, b.Stdin)
 	}
 	if vendored.ResolveModel("opus") != onPath.ResolveModel("opus") {
 		t.Error("the two providers resolve model aliases differently")

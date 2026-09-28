@@ -241,10 +241,11 @@ func (p *dialect) Descriptor() agentic.Descriptor {
 
 // StreamCommand renders a Request as `codex exec`.
 //
-// The subcommand is the shape that differs most from claudecode: the prompt is
-// a positional argument after a subcommand rather than the value of a flag.
-// That is the reason Invocation carries an argv the provider assembles in full,
-// rather than the library assembling one from named parts.
+// The subcommand is the shape that differs most from claudecode: a run is
+// `exec` followed by its flags, and the prompt arrives on stdin because no
+// PROMPT argument is given, rather than following a -p flag. That is the
+// reason Invocation carries an argv the provider assembles in full, rather
+// than the library assembling one from named parts.
 //
 // --json is the only output mode. It is a stream, so there is no second
 // invocation for a batched run to drift away from this one.
@@ -286,11 +287,13 @@ func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error)
 		}
 		args = append(args, schemaArgs...)
 	}
-	// The prompt is positional and last, so nothing it contains can be read as
-	// a flag.
-	args = append(args, req.Prompt)
-
-	return agentic.Invocation{Args: args, Env: p.dialectEnv()}, nil
+	// The prompt goes on stdin and never into argv, so nothing it contains can
+	// be read as a flag. `codex exec` reads stdin only when no PROMPT argument
+	// is given: a positional alongside piped stdin makes stdin an extra
+	// `<stdin>` block appended to the prompt. As an argument it would also be a
+	// single argv element, which Linux caps at 128 KiB: a prompt embedding a
+	// large diff fails to exec with E2BIG.
+	return agentic.Invocation{Args: args, Env: p.dialectEnv(), Stdin: []byte(req.Prompt)}, nil
 }
 
 // sandboxModes is what -s accepts. Ordered as codex documents them, widening
