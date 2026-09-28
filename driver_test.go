@@ -474,6 +474,21 @@ func TestScriptedPermissionsAreRefusedByAProviderThatCannotApplyThem(t *testing.
 	}
 }
 
+// A dropped denial fails in the dangerous direction: the run proceeds with a
+// tool the request meant to close off.
+func TestDisallowedToolsAreRefusedByAProviderThatCannotApplyThem(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	d := driver(t, &stub{}, fake)
+
+	_, err := d.Run(t.Context(), agentic.Request{Prompt: "hi", DisallowedTools: []string{"Agent"}})
+	if !errors.Is(err, agentic.ErrDisallowUnsupported) {
+		t.Fatalf("error = %v, want ErrDisallowUnsupported", err)
+	}
+	if fake.Ran() {
+		t.Error("a denial the provider cannot honour still spawned a process")
+	}
+}
+
 // An empty roster is the absence of a request, not a request a provider has to
 // be able to honour — refusing it would make the field unusable to any caller
 // that builds one conditionally.
@@ -482,9 +497,10 @@ func TestAnEmptyRosterAsksNothingOfTheProvider(t *testing.T) {
 	d := driver(t, &stub{}, fake)
 
 	if _, err := d.Run(t.Context(), agentic.Request{
-		Prompt:       "hi",
-		Agents:       map[string]agentic.Agent{},
-		AllowedTools: []string{},
+		Prompt:          "hi",
+		Agents:          map[string]agentic.Agent{},
+		AllowedTools:    []string{},
+		DisallowedTools: []string{},
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1019,5 +1035,17 @@ func TestAProviderThatReadsNoBlocksClaimsNone(t *testing.T) {
 
 	if got := d.DetectableBlocks(); got != nil {
 		t.Fatalf("DetectableBlocks() = %v, want nil", got)
+	}
+}
+
+// A capability a Driver does not model as its own accessor — Disallower is one
+// — is still reachable by asserting on what Provider() hands back.
+func TestProviderReturnsWhatTheDriverWasBuiltWith(t *testing.T) {
+	fake := (&agentictest.Fake{Stdout: okEnvelope}).Build(t)
+	p := &stub{}
+	d := driver(t, p, fake)
+
+	if got := d.Provider(); got != p {
+		t.Errorf("Provider() = %v, want the provider New was called with", got)
 	}
 }
