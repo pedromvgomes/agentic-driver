@@ -270,6 +270,14 @@ func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error)
 		return agentic.Invocation{}, fmt.Errorf(
 			"%w: codex has no turn limit; bound the run with Request.Timeout instead", agentic.ErrInvalidRequest)
 	}
+	if len(req.DisallowedTools) > 0 {
+		// Same reasoning as MaxTurns above: Driver.prepare already refuses this
+		// for a caller that goes through Driver, but StreamCommand is reachable
+		// directly on the provider, and a dropped deny-list runs the request
+		// with more authority than it asked for.
+		return agentic.Invocation{}, fmt.Errorf(
+			"%w: codex has no per-tool deny-list; features.multi_agent is the nearest control, and it is not per-tool", agentic.ErrInvalidRequest)
+	}
 
 	args := []string{"exec", "--json", "--skip-git-repo-check"}
 	if req.Model != "" {

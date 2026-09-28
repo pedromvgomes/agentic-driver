@@ -127,6 +127,20 @@ func TestAToolAllowlistNeverProducesAnInvocation(t *testing.T) {
 	}
 }
 
+// StreamCommand is reachable directly on the provider, without going through
+// Driver.prepare's gate, so the refusal has to hold here too — not only at the
+// layer a caller might skip.
+func TestADenyListNeverProducesAnInvocation(t *testing.T) {
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi", DisallowedTools: []string{"Agent"}})
+
+	if err == nil {
+		t.Fatalf("a deny-list produced the invocation %q instead of a refusal", inv.Args)
+	}
+	if !errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Errorf("error = %v, want ErrInvalidRequest", err)
+	}
+}
+
 func TestASandboxModeBecomesTheSandboxFlag(t *testing.T) {
 	for _, mode := range []string{"read-only", "workspace-write", "danger-full-access"} {
 		args, err := onPath(t).PermissionArgs(mode, nil)
