@@ -14,19 +14,31 @@ import (
 	"github.com/pedromvgomes/agentic-driver/claudecode"
 )
 
-// The prompt is positional and last, so a prompt beginning with a dash cannot
-// be read as a flag.
-func TestThePromptIsTheLastArgument(t *testing.T) {
-	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "--not-a-flag", Model: "gpt-5"})
+// The prompt travels on stdin, so argv is the same whatever the prompt says —
+// including a prompt spelled like a flag, or like the `-` that tells codex to
+// read stdin.
+func TestArgvIsTheSameWhateverThePromptSays(t *testing.T) {
+	want, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi", Model: "gpt-5"})
 	if err != nil {
-		t.Fatalf("Command: %v", err)
+		t.Fatalf("StreamCommand: %v", err)
+	}
+	if want.Args[0] != "exec" {
+		t.Errorf("argv starts %q, want the exec subcommand first", want.Args)
 	}
 
-	if got := inv.Args[len(inv.Args)-1]; got != "--not-a-flag" {
-		t.Errorf("last argument = %q, want the prompt", got)
-	}
-	if inv.Args[0] != "exec" {
-		t.Errorf("argv starts %q, want the exec subcommand first", inv.Args)
+	for _, prompt := range []string{"--not-a-flag", skipGitRepoCheck, "-", "--model=o3"} {
+		t.Run(prompt, func(t *testing.T) {
+			inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: prompt, Model: "gpt-5"})
+			if err != nil {
+				t.Fatalf("StreamCommand: %v", err)
+			}
+			if !slices.Equal(inv.Args, want.Args) {
+				t.Errorf("argv = %q, want %q: the prompt must not reach argv", inv.Args, want.Args)
+			}
+			if string(inv.Stdin) != prompt {
+				t.Errorf("stdin = %q, want the prompt %q", inv.Stdin, prompt)
+			}
+		})
 	}
 }
 
@@ -189,6 +201,13 @@ const skipGitRepoCheck = "--skip-git-repo-check"
 // the dialect asks for; this tests what the driver spawns.
 func recordedArgs(t *testing.T, req agentic.Request) []string {
 	t.Helper()
+	return ranFake(t, req).Recorded(t).Args
+}
+
+// ranFake runs one request through a fake binary and returns the fake, so a
+// test can read back both the argv and the stdin the child was given.
+func ranFake(t *testing.T, req agentic.Request) *agentictest.Fake {
+	t.Helper()
 
 	stream, err := os.ReadFile(filepath.Join("testdata", "success-mini.ndjson"))
 	if err != nil {
@@ -201,9 +220,9 @@ func recordedArgs(t *testing.T, req agentic.Request) []string {
 		t.Fatalf("agentic.New: %v", err)
 	}
 	if _, err := d.Run(t.Context(), req); err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("Run with a %d-byte prompt: %v", len(req.Prompt), err)
 	}
-	return fake.Recorded(t).Args
+	return fake
 }
 
 // Without the flag codex refuses to start outside a git repository, and a
@@ -241,21 +260,42 @@ func TestTheSpawnedChildIsGivenTheGitRepositoryCheckFlag(t *testing.T) {
 	}
 }
 
-// Every flag stands ahead of the positional prompt, so nothing the prompt
-// contains can be read as one — including a prompt that is spelled exactly like
-// the flag.
-func TestTheGitRepositoryCheckFlagStandsAheadOfThePrompt(t *testing.T) {
-	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: skipGitRepoCheck})
-	if err != nil {
-		t.Fatalf("StreamCommand: %v", err)
-	}
+// A prompt spelled exactly like the flag reaches the child on stdin, and the
+// child's argv carries the flag once: the one the dialect put there.
+func TestAPromptSpelledLikeTheGitRepositoryCheckFlagStaysOutOfArgv(t *testing.T) {
+	fake := ranFake(t, agentic.Request{Prompt: skipGitRepoCheck})
 
-	last := len(inv.Args) - 1
-	if inv.Args[last] != skipGitRepoCheck {
-		t.Fatalf("last argument = %q, want the prompt", inv.Args[last])
+	args := fake.Recorded(t).Args
+	var n int
+	for _, arg := range args {
+		if arg == skipGitRepoCheck {
+			n++
+		}
 	}
-	if !slices.Contains(inv.Args[:last], skipGitRepoCheck) {
-		t.Errorf("argv = %q, want the flag ahead of the prompt", inv.Args)
+	if n != 1 {
+		t.Errorf("the child was run as %q, want %s exactly once", args, skipGitRepoCheck)
+	}
+	if got := fake.Stdin(t); got != skipGitRepoCheck {
+		t.Errorf("stdin = %q, want the prompt %q", got, skipGitRepoCheck)
+	}
+}
+
+// Linux caps a single argv element at 128 KiB, and a prompt embedding a whole
+// diff routinely exceeds it. The run goes through a real exec, because an
+// Invocation inspected without spawning anything cannot fail at execve(2).
+func TestAPromptLargerThanAnArgvElementReachesTheCLIOnStdin(t *testing.T) {
+	const marker = "diff --git a/prompt b/prompt\n"
+	prompt := strings.Repeat(marker, 200*1024/len(marker)+1)
+
+	fake := ranFake(t, agentic.Request{Prompt: prompt})
+
+	if got := fake.Stdin(t); got != prompt {
+		t.Errorf("stdin carried %d bytes, want the %d-byte prompt verbatim", len(got), len(prompt))
+	}
+	for _, arg := range fake.Recorded(t).Args {
+		if strings.Contains(arg, "diff --git") {
+			t.Errorf("argv carries the prompt, which fails to exec once it outgrows one argument: %.80q", arg)
+		}
 	}
 }
 
