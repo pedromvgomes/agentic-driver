@@ -214,6 +214,17 @@ func (d *Driver) Descriptor() Descriptor { return d.descriptor }
 // Binary reports the executable the driver will run.
 func (d *Driver) Binary() string { return d.binary }
 
+// Provider returns the underlying Provider, for a caller that needs to
+// type-assert a capability this driver has no accessor for — Permitter,
+// AgentDefiner, Resumer, TurnLimiter, or one not yet invented.
+//
+// It is the escape hatch, not a growing list of convenience wrappers: a
+// capability worth calling often earns its own accessor, the way Model and
+// MaxConcurrentRuns already have. Adding one here per capability would just
+// move the type assertion from the caller into this file without removing
+// it.
+func (d *Driver) Provider() Provider { return d.provider }
+
 // Model reports the model this driver currently runs: the concrete name a
 // request that names none would be answered by.
 //
@@ -343,6 +354,14 @@ func (d *Driver) prepare(req Request) (Request, error) {
 	if len(req.AllowedTools) > 0 || req.PermissionMode != "" {
 		if _, ok := d.provider.(Permitter); !ok {
 			return req, fmt.Errorf("%w: %s", ErrPermissionsUnsupported, d.descriptor.ID)
+		}
+	}
+
+	// Same direction of failure as AllowedTools: a dropped exclusion list
+	// widens what the run may do rather than narrowing it.
+	if len(req.DisallowedTools) > 0 {
+		if _, ok := d.provider.(Disallower); !ok {
+			return req, fmt.Errorf("%w: %s", ErrDisallowUnsupported, d.descriptor.ID)
 		}
 	}
 
