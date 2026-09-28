@@ -222,6 +222,11 @@ func (p *dialect) commonArgs(req agentic.Request) ([]string, error) {
 		return nil, err
 	}
 	args = append(args, permArgs...)
+	denyArgs, err := p.DisallowArgs(req.DisallowedTools)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, denyArgs...)
 	agentArgs, err := p.AgentArgs(req.Agents)
 	if err != nil {
 		return nil, err
@@ -348,7 +353,7 @@ func (p *dialect) PermissionArgs(mode string, allowedTools []string) ([]string, 
 	}
 
 	for _, tool := range allowedTools {
-		if err := checkToolPattern(tool); err != nil {
+		if err := checkToolPattern(tool, false); err != nil {
 			return nil, err
 		}
 	}
@@ -358,25 +363,61 @@ func (p *dialect) PermissionArgs(mode string, allowedTools []string) ([]string, 
 	return append(args, "--allowedTools", strings.Join(allowedTools, ",")), nil
 }
 
-// checkToolPattern refuses an entry the CLI would read as something wider than
-// what it says.
+// DisallowArgs removes tools from the run.
+//
+// --disallowedTools is argv like --allowedTools, so it applies under
+// --setting-sources ”, and it takes precedence over both the allowlist and
+// the permission mode: a denied tool stays denied under bypassPermissions.
+// That is what closes the gap an allowlist cannot — a tool that needs no
+// permission is never checked against the allowlist at all.
+//
+// The entries share the allowlist's syntax and its comma-joined spelling, and
+// are checked the same way, with one difference: a bare `*` is accepted,
+// because denying every tool is a coherent thing to ask for.
+func (p *dialect) DisallowArgs(tools []string) ([]string, error) {
+	for _, tool := range tools {
+		if err := checkToolPattern(tool, true); err != nil {
+			return nil, err
+		}
+	}
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	return []string{"--disallowedTools", strings.Join(tools, ",")}, nil
+}
+
+// checkToolPattern refuses an entry the CLI would read as something other than
+// what it says. deny says which list the entry belongs to, because the same
+// misreading distorts the two lists in opposite directions.
 //
 // The CLI's tool list splits on whitespace that sits OUTSIDE parentheses, so a
-// space in the wrong place does not fail — it grants more. `Bash (agtk memory
-// anchor*)` becomes the bare grant `Bash`, which is every command; and any
-// entry yielding a bare `*` grants every tool outright. Both read, to a human
-// skimming a config, exactly like the narrow grant that was intended.
+// space in the wrong place does not fail — it widens the entry. `Bash (agtk
+// memory anchor*)` becomes the bare `Bash`, which is every command: on an
+// allowlist that grants every command, and on a deny-list it takes away every
+// command when one was meant. Both read, to a human skimming a config, exactly
+// like the narrow entry that was intended.
 //
-// A blank entry is refused for the mirror-image reason: the CLI reads it as a
-// tool named "", which matches nothing and quietly narrows the grant instead.
-func checkToolPattern(tool string) error {
+// A blank entry is refused because the CLI reads it as a tool named "", which
+// matches nothing. On an allowlist that quietly narrows the grant; on a
+// deny-list it quietly denies nothing, leaving open whatever the caller meant
+// to close off.
+//
+// An entry that is nothing but `*` matches every tool. On an allowlist that is
+// a grant of everything wearing the look of a restriction, and is refused; on a
+// deny-list it asks for every tool to be denied, and is accepted.
+func checkToolPattern(tool string, deny bool) error {
+	list, verb, effect := "AllowedTools", "grants", "grant"
+	if deny {
+		list, verb, effect = "DisallowedTools", "denies", "denial"
+	}
+
 	if strings.TrimSpace(tool) == "" {
-		return fmt.Errorf("%w: an allowed tool is blank", agentic.ErrInvalidRequest)
+		return fmt.Errorf("%w: an entry in %s is blank and %s nothing", agentic.ErrInvalidRequest, list, verb)
 	}
 	if strings.Contains(tool, ",") {
 		// The entries are joined with commas, so one containing a comma
-		// silently becomes two grants.
-		return fmt.Errorf("%w: allowed tool %q contains a comma, which separates entries", agentic.ErrInvalidRequest, tool)
+		// silently becomes two.
+		return fmt.Errorf("%w: %s entry %q contains a comma, which separates entries", agentic.ErrInvalidRequest, list, tool)
 	}
 
 	depth := 0
@@ -387,16 +428,16 @@ func checkToolPattern(tool string) error {
 		case r == ')':
 			depth--
 		case depth == 0 && unicode.IsSpace(r):
-			return fmt.Errorf("%w: allowed tool %q has whitespace outside its parentheses, which the CLI reads as a wider grant",
-				agentic.ErrInvalidRequest, tool)
+			return fmt.Errorf("%w: %s entry %q has whitespace outside its parentheses, which the CLI reads as a wider %s",
+				agentic.ErrInvalidRequest, list, tool, effect)
 		}
 	}
 	if depth != 0 {
-		return fmt.Errorf("%w: allowed tool %q has unbalanced parentheses", agentic.ErrInvalidRequest, tool)
+		return fmt.Errorf("%w: %s entry %q has unbalanced parentheses", agentic.ErrInvalidRequest, list, tool)
 	}
-	if strings.TrimSpace(strings.Trim(tool, "*")) == "" {
-		return fmt.Errorf("%w: allowed tool %q grants every tool; leave AllowedTools empty to ask for no restriction",
-			agentic.ErrInvalidRequest, tool)
+	if !deny && strings.TrimSpace(strings.Trim(tool, "*")) == "" {
+		return fmt.Errorf("%w: %s entry %q grants every tool; leave %s empty to ask for no restriction",
+			agentic.ErrInvalidRequest, list, tool, list)
 	}
 	return nil
 }
@@ -484,6 +525,7 @@ var (
 	_ agentic.Resumer       = (*Provider)(nil)
 	_ agentic.AgentDefiner  = (*Provider)(nil)
 	_ agentic.Permitter     = (*Provider)(nil)
+	_ agentic.Disallower    = (*Provider)(nil)
 	_ agentic.TurnLimiter   = (*Provider)(nil)
 
 	// Both, and the pair is the claim. Pinner says which build runs; Installer
@@ -506,6 +548,7 @@ var (
 	_ agentic.Resumer       = (*PathProvider)(nil)
 	_ agentic.AgentDefiner  = (*PathProvider)(nil)
 	_ agentic.Permitter     = (*PathProvider)(nil)
+	_ agentic.Disallower    = (*PathProvider)(nil)
 	_ agentic.TurnLimiter   = (*PathProvider)(nil)
 
 	_ agentic.SchemaConstrainer = (*PathProvider)(nil)

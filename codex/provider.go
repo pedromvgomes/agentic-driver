@@ -270,6 +270,14 @@ func (p *dialect) StreamCommand(req agentic.Request) (agentic.Invocation, error)
 		return agentic.Invocation{}, fmt.Errorf(
 			"%w: codex has no turn limit; bound the run with Request.Timeout instead", agentic.ErrInvalidRequest)
 	}
+	if len(req.DisallowedTools) > 0 {
+		// Same reasoning as MaxTurns above: Driver.prepare already refuses this
+		// for a caller that goes through Driver, but StreamCommand is reachable
+		// directly on the provider, and a dropped deny-list runs the request
+		// with more authority than it asked for.
+		return agentic.Invocation{}, fmt.Errorf(
+			"%w: codex has no per-tool deny-list; features.multi_agent is the nearest control, and it is not per-tool", agentic.ErrInvalidRequest)
+	}
 
 	args := []string{"exec", "--json", "--skip-git-repo-check"}
 	if req.Model != "" {
@@ -587,13 +595,23 @@ func (p *dialect) DetectableBlocks() []agentic.BlockReason {
 }
 
 // Compile-time proof of which capabilities each provider claims. Neither
-// implements Resumer nor AgentDefiner nor TurnLimiter: absent capabilities are
-// absent from the type, and the driver answers for them without spawning
-// anything.
+// implements Resumer nor AgentDefiner nor TurnLimiter nor Disallower: absent
+// capabilities are absent from the type, and the driver answers for them
+// without spawning anything.
 //
 // TurnLimiter is absent because codex has no turn bound to express, and
 // AgentDefiner because it has no vocabulary for declaring a roster on the
 // command line.
+//
+// Disallower is absent for the reason PermissionArgs refuses AllowedTools
+// outright rather than approximating it: codex's nearest analogue to a
+// per-tool deny-list, features.multi_agent, is a single on/off switch over
+// five tools at once, not a per-tool control. A Disallower built on it could
+// only honor a couple of hardcoded names and silently refuse the rest — the
+// same silent-scope failure ErrTurnLimitUnsupported already exists to
+// prevent, just partial instead of total — so codex never implements the
+// interface, and Driver.prepare refuses a non-empty DisallowedTools with
+// ErrDisallowUnsupported before any process starts.
 //
 // Installer is absent from BOTH, and that is the one worth reading twice. The
 // vendored Provider is a Pinner: it settles which bytes run, by refusing any

@@ -299,6 +299,20 @@ The answer is the provider's and does not change with the credential mode.
 a driver claiming "isolated, therefore unbounded" would be answering for a
 profile it cannot see.
 
+`DetectableBlocks` and `MaxConcurrentRuns` exist because those two capabilities
+are worth asking about often enough to earn a convenience accessor; most are
+not. `Driver.Provider()` returns the underlying `Provider` for any of the
+rest — `Permitter`, `AgentDefiner`, `Resumer`, `TurnLimiter`, `Disallower`, or
+one not yet invented — so a caller can type-assert it directly, without
+holding on to its own reference to the concrete provider passed to
+`agentic.New` or submitting a `Request` just to read the refusal back:
+
+```go
+if _, ok := driver.Provider().(agentic.Disallower); ok {
+    // this provider can apply Request.DisallowedTools
+}
+```
+
 ## Testing
 
 Three layers, and only the third costs money:
@@ -349,9 +363,11 @@ Early. The API is not stable. `claudecode` is complete. `codex` drives
 single-turn runs: `StreamCommand`, the decoder, `PermissionArgs`, `SchemaArgs`,
 `AuthEnv` and `DenyEnv` are written against captured output from the real CLI,
 at the version `codex.New` pins. It declares no `TurnLimiter` (codex has no turn
-bound), no `AgentDefiner` and no `Installer`, and its `PermissionArgs` refuses
-`AllowedTools` outright — codex has no per-tool allowlist, and accepting one
-could only mean discarding it. `codex.New` vendors on darwin and linux;
+bound), no `AgentDefiner`, no `Installer` and no `Disallower` (codex's nearest
+analogue, `features.multi_agent`, is a single switch over five tools at once,
+not a per-tool control), and its `PermissionArgs` refuses `AllowedTools`
+outright — codex has no per-tool allowlist, and accepting one could only mean
+discarding it. `codex.New` vendors on darwin and linux;
 Windows uses `codex.NewOnPath`.
 
 ## License

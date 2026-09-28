@@ -37,6 +37,12 @@ var (
 	// failure runs with more authority than was asked for, never less.
 	ErrPermissionsUnsupported = errors.New("provider does not support scripted permissions")
 
+	// ErrDisallowUnsupported means Request.DisallowedTools was set on a
+	// provider that does not implement Disallower. Dropping the list widens
+	// what the run may do, so the silent failure runs with more authority than
+	// was asked for, never less.
+	ErrDisallowUnsupported = errors.New("provider does not support disallowing tools")
+
 	// ErrTurnLimitUnsupported means Request.MaxTurns was set on a provider that
 	// does not implement TurnLimiter. Dropping the bound leaves the loop to run
 	// as long as the CLI's own default allows, while the caller believes a cap

@@ -183,6 +183,17 @@ one that holds none.
 Resolution: it is a **Capability**, not a given. Codex has no per-tool allowlist of any
 kind, so it refuses `AllowedTools` rather than accepting and discarding it.
 
+**"Tool deny-list"** — the mirror image of the allowlist, and assumed to be easier to
+support approximately because "remove one tool" sounds smaller than "name every tool
+allowed." It isn't: `Request.DisallowedTools` requires a **Provider** implementing
+`Disallower`, a capability distinct from `Permitter` because a provider can grant an
+allowlist without being able to remove anything from it, or vice versa. Codex has no
+per-tool removal mechanism either — its nearest analogue, `features.multi_agent`, is a
+single on/off switch over five tools at once, not a per-tool control — so it refuses
+`DisallowedTools` outright rather than mapping a handful of names to that switch and
+refusing the rest. A **Capability** that only partially honors what it is asked is the
+same silent-scope failure as one that honors nothing while claiming to.
+
 ## Example dialogue
 
 > **Dev:** Codex exited 1 and the stream ends in `turn.failed`. Is that an outage?

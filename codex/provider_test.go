@@ -94,6 +94,9 @@ func TestAbsentCapabilitiesAreAbsentFromTheType(t *testing.T) {
 	if _, ok := p.(agentic.TurnLimiter); ok {
 		t.Error("codex implements TurnLimiter, but it has no configuration field for a turn bound")
 	}
+	if _, ok := p.(agentic.Disallower); ok {
+		t.Error("codex implements Disallower, but its nearest analogue is a single switch over five tools, not a per-tool control")
+	}
 }
 
 // The honest outcome: codex constrains a run by sandbox, not by tool. Its
@@ -118,6 +121,20 @@ func TestAToolAllowlistNeverProducesAnInvocation(t *testing.T) {
 
 	if err == nil {
 		t.Fatalf("a tool grant produced the invocation %q instead of a refusal", inv.Args)
+	}
+	if !errors.Is(err, agentic.ErrInvalidRequest) {
+		t.Errorf("error = %v, want ErrInvalidRequest", err)
+	}
+}
+
+// StreamCommand is reachable directly on the provider, without going through
+// Driver.prepare's gate, so the refusal has to hold here too — not only at the
+// layer a caller might skip.
+func TestADenyListNeverProducesAnInvocation(t *testing.T) {
+	inv, err := onPath(t).StreamCommand(agentic.Request{Prompt: "hi", DisallowedTools: []string{"Agent"}})
+
+	if err == nil {
+		t.Fatalf("a deny-list produced the invocation %q instead of a refusal", inv.Args)
 	}
 	if !errors.Is(err, agentic.ErrInvalidRequest) {
 		t.Errorf("error = %v, want ErrInvalidRequest", err)
