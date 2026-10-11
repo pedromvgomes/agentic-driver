@@ -102,6 +102,10 @@ type sigSpec struct {
 	packets      int
 	// oversizedValue makes the signature value one byte longer than the key.
 	oversizedValue bool
+	// version and algorithm override the packet header's v4 and RSA; trailing
+	// appends bytes after the signature value.
+	version, algorithm byte
+	trailing           []byte
 }
 
 func subpacket(kind byte, data ...byte) []byte {
@@ -142,7 +146,14 @@ func (k testKey) sign(t testing.TB, data []byte, spec sigSpec) []byte {
 		hashed = append(hashed, subpacket(spec.criticalType|subpacketCriticalFl, 1)...)
 	}
 
-	header := append([]byte{4, spec.sigType, algoRSA, spec.hashID},
+	if spec.version == 0 {
+		spec.version = 4
+	}
+	if spec.algorithm == 0 {
+		spec.algorithm = algoRSA
+	}
+
+	header := append([]byte{spec.version, spec.sigType, spec.algorithm, spec.hashID},
 		byte(len(hashed)>>8), byte(len(hashed)))
 	header = append(header, hashed...)
 
@@ -164,6 +175,7 @@ func (k testKey) sign(t testing.TB, data []byte, spec sigSpec) []byte {
 	body := append(header, 0, 0) // no unhashed subpackets
 	body = append(body, digest[:2]...)
 	body = append(body, mpi(value)...)
+	body = append(body, spec.trailing...)
 
 	one := packetBytes(packetSignature, body)
 	var all []byte
@@ -283,6 +295,9 @@ func TestMalformedSignaturesAreRefused(t *testing.T) {
 		"made before the key existed":   {created: signer.created.Add(-time.Hour)},
 		"expired":                       {created: time.Now().Add(-2 * time.Hour), expiresAfter: 3600},
 		"an unknown critical subpacket": {criticalType: 99},
+		"a v3 signature":                {version: 3},
+		"a non-RSA algorithm":           {algorithm: 22},
+		"bytes after the value":         {trailing: []byte{0}},
 		"a value longer than the key":   {oversizedValue: true},
 		"two signatures in one file":    {packets: 2},
 	}
