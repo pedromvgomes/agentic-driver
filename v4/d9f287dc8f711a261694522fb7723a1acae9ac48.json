@@ -1,0 +1,7 @@
+{
+  "agentic-driver": {
+    "covered": 1386,
+    "total": 1521,
+    "producer": "go 1.26.9"
+  }
+}
