@@ -418,6 +418,7 @@ func TestReadPackets(t *testing.T) {
 		in   []byte
 		want []packet
 	}{
+		"a five-byte length of zero":        {[]byte{0xc2, 255, 0, 0, 0, 0}, []packet{{tag: 2, body: []byte{}}}},
 		"a new-format packet with no body":  {[]byte{0xc2, 0x00}, []packet{{tag: 2, body: []byte{}}}},
 		"a new-format one-byte length":      {[]byte{0xc6, 0x02, 9, 9}, []packet{{tag: 6, body: []byte{9, 9}}}},
 		"the longest one-byte length":       {append([]byte{0xc2, 191}, bytes.Repeat([]byte{1}, 191)...), nil},
@@ -486,14 +487,16 @@ func TestReadSubpackets(t *testing.T) {
 	}
 	twoByte := append([]byte{192, 0}, filler(100, 192)...)
 	fiveByte := append([]byte{255, 0, 0, 0x23, 0x28}, filler(100, 9000)...)
+	twoByteLong := append([]byte{192, 108}, filler(100, 300)...)
 	empty := []byte{1, 100}
 	created := subpacket(subpacketCreated, 0, 0, 0, 9)
 
 	for name, area := range map[string][]byte{
-		"an unknown subpacket with two-byte length":  append(bytes.Clone(twoByte), created...),
-		"an unknown subpacket with five-byte length": append(bytes.Clone(fiveByte), created...),
-		"an unknown subpacket with no data":          append(bytes.Clone(empty), created...),
-		"the longest one-byte length":                append(append([]byte{191}, filler(100, 191)...), created...),
+		"an unknown subpacket with two-byte length":        append(bytes.Clone(twoByte), created...),
+		"an unknown subpacket with a long two-byte length": append(bytes.Clone(twoByteLong), created...),
+		"an unknown subpacket with five-byte length":       append(bytes.Clone(fiveByte), created...),
+		"an unknown subpacket with no data":                append(bytes.Clone(empty), created...),
+		"the longest one-byte length":                      append(append([]byte{191}, filler(100, 191)...), created...),
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := readSubpackets(area)

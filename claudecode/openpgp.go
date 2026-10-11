@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/rsa"
-	"crypto/sha1" //nolint:gosec // OpenPGP v4 fingerprints are defined as SHA-1; the key's identity is pinned by it, not signed by it.
+	"crypto/sha1" // #nosec G505 -- OpenPGP v4 fingerprints are defined as SHA-1; the key is identified by it, nothing is signed with it.
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -116,7 +116,7 @@ func parsePublicKey(armored []byte) (publicKey, error) {
 	if len(body) > math.MaxUint16 { // [lydite:exclude_from_mutation][unreachable: MPIs cap the body below 17 KiB]
 		return publicKey{}, errors.New("the primary key is too long to fingerprint")
 	}
-	h := sha1.New()                                              //nolint:gosec // see the import.
+	h := sha1.New()                                              // #nosec G401 -- the v4 fingerprint is a SHA-1 by definition, see the import. // nosemgrep
 	h.Write([]byte{0x99, byte(len(body) >> 8), byte(len(body))}) // #nosec G115 -- len(body) is at most MaxUint16, checked above.
 	h.Write(body)
 
@@ -343,12 +343,12 @@ func readSubpackets(area []byte) (subpacketData, error) {
 		case first < 192:
 			length, area = first, area[1:]
 		case first < 255:
-			if len(area) < 2 {
+			if len(area) < 2 { // [lydite:exclude_from_mutation][a 2-byte input declares at least 192 data bytes and fails below]
 				return out, errors.New("truncated signature subpacket length")
 			}
 			length, area = (first-192)<<8+int(area[1])+192, area[2:]
 		default:
-			if len(area) < 5 {
+			if len(area) < 5 { // [lydite:exclude_from_mutation][a 5-byte input declares a zero length and fails below]
 				return out, errors.New("truncated signature subpacket length")
 			}
 			length, area = int(binary.BigEndian.Uint32(area[1:5])), area[5:]
