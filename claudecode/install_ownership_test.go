@@ -49,7 +49,7 @@ func gated(t *testing.T) (inst *Installer, version string, started <-chan struct
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(installer, b.entity)
+	trust(t, installer, b.key)
 
 	return installer, b.version, begun, unblock
 }

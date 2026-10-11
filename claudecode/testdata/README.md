@@ -16,6 +16,7 @@ capture the first time one is obtainable.
 | File | Provenance |
 |---|---|
 | `blocked-exhausted.json` | Derived — Claude Code 2.1.266. `api_error_status` is the envelope's documented HTTP status for an API error; the result envelope's `subtype` vocabulary is closed (`success`, `error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`) and carries no limit member, so a blocked run reports `subtype: "success"` with `is_error` set, exactly as the captured `rejected-auth.json` does for 401. Every field but the status, the message and the identifiers is that captured envelope unchanged. `Usage limit reached` is a message string present in the same artifact, and nothing keys on it. |
+| `manifest-2.1.280.json`, `manifest-2.1.280.json.sig` | Captured — `downloads.claude.ai/claude-code-releases/2.1.280/`, fetched verbatim; the signature was also checked with `gpg --verify` against `anthropic-release-key.asc`. They are the document and detached signature the verifier has to accept, and the bytes every tamper case starts from. |
 
 Producing an exhausted run on demand means genuinely spending a subscription window,
 which is why this one is derived. Nothing else here is.

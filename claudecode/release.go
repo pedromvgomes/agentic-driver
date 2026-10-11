@@ -23,8 +23,6 @@ import (
 	"time"
 
 	_ "embed"
-
-	"github.com/ProtonMail/go-crypto/openpgp"
 )
 
 // DefaultBaseURL is Anthropic's release bucket.
@@ -109,22 +107,22 @@ func PlatformKey(goos, goarch string) (string, error) {
 type releaseClient struct {
 	baseURL string
 	client  *http.Client
-	keyring openpgp.EntityList
+	key     publicKey
 	// expectFingerprint is the signer Manifest will accept. A field rather than
 	// the constant directly so a test can substitute a whole trust anchor —
-	// keyring AND expected signer together. Substituting only the keyring would
-	// leave the two halves disagreeing, which is not a configuration that can
-	// exist in production.
+	// key AND expected signer together. Substituting only the key would leave
+	// the two halves disagreeing, which is not a configuration that can exist in
+	// production.
 	expectFingerprint string
 	platform          string
 }
 
 func newReleaseClient(baseURL string, httpClient *http.Client) (*releaseClient, error) {
-	keyring, err := openpgp.ReadArmoredKeyRing(strings.NewReader(string(signingKey)))
+	key, err := parsePublicKey(signingKey)
 	if err != nil {
 		return nil, fmt.Errorf("read the embedded signing key: %w", err)
 	}
-	if err := assertFingerprint(keyring); err != nil {
+	if err := assertFingerprint(key); err != nil {
 		return nil, err
 	}
 
@@ -142,34 +140,28 @@ func newReleaseClient(baseURL string, httpClient *http.Client) (*releaseClient, 
 	return &releaseClient{
 		baseURL:           strings.TrimSuffix(baseURL, "/"),
 		client:            httpClient,
-		keyring:           keyring,
+		key:               key,
 		expectFingerprint: SigningKeyFingerprint,
 		platform:          platform,
 	}, nil
 }
 
-// assertFingerprint checks the embedded keyring holds exactly the key we mean.
+// assertFingerprint checks the embedded key is exactly the key we mean.
 //
 // The fingerprint is the constant an operator can check against Anthropic's
 // published value; the key file is bytes nobody reads. Checking one against the
 // other at startup is what stops swapping the file silently changing who is
 // trusted.
 //
-// EXACTLY ONE entity, not "at least one that matches". A keyring with the right
-// key plus an attacker's would have satisfied a contains-check while making the
-// attacker a trusted signer — and the manifest verification would have accepted
-// their signature. Manifest() also checks the signer's own fingerprint, so this
-// is belt and braces on the property that matters most in the package.
-func assertFingerprint(keyring openpgp.EntityList) error {
-	if len(keyring) != 1 {
-		return fmt.Errorf("%w: the embedded keyring holds %d keys, expected exactly 1",
-			ErrUnsignedManifest, len(keyring))
-	}
-
-	got := strings.ToUpper(hex.EncodeToString(keyring[0].PrimaryKey.Fingerprint))
-	if got != SigningKeyFingerprint {
+// parsePublicKey accepts a key block with exactly one primary key, so a file
+// holding the right key plus an attacker's is refused before this comparison
+// rather than satisfying a contains-check while making the attacker a trusted
+// signer. Manifest() also checks the signing key's own fingerprint, so this is
+// belt and braces on the property that matters most in the package.
+func assertFingerprint(key publicKey) error {
+	if key.fingerprint != SigningKeyFingerprint {
 		return fmt.Errorf("%w: the embedded key is %s, expected %s",
-			ErrUnsignedManifest, got, SigningKeyFingerprint)
+			ErrUnsignedManifest, key.fingerprint, SigningKeyFingerprint)
 	}
 	return nil
 }
@@ -203,28 +195,15 @@ func (c *releaseClient) Manifest(ctx context.Context, version string) (Manifest,
 		return Manifest{}, fmt.Errorf("fetch the manifest signature: %w", err)
 	}
 
-	signer, err := openpgp.CheckArmoredDetachedSignature(
-		c.keyring, strings.NewReader(string(raw)), strings.NewReader(string(sig)), nil)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("%w: %w", ErrUnsignedManifest, err)
-	}
-
-	// Check WHO signed it, not merely that the keyring contains the right key.
-	//
-	// CheckArmoredDetachedSignature accepts a signature from ANY entity in the
-	// keyring and returns which one. Discarding that answer rests the whole
-	// guarantee on the keyring having exactly one member: appending a second
-	// armored key to the embedded file would make it a fully trusted signer
-	// while every other check still passed, defeating the
-	// "swapping the file cannot change who is trusted" property the embedded
-	// key exists to provide.
-	if signer == nil {
-		return Manifest{}, fmt.Errorf("%w: the signature names no key", ErrUnsignedManifest)
-	}
-	got := strings.ToUpper(hex.EncodeToString(signer.PrimaryKey.Fingerprint))
-	if got != c.expectFingerprint {
+	// Check WHO signed it, not merely that a key verifies: the key the signature
+	// is checked against must be the pinned one, so a substituted key file cannot
+	// change who is trusted while every other check still passes.
+	if c.key.fingerprint != c.expectFingerprint {
 		return Manifest{}, fmt.Errorf("%w: signed by %s, expected %s",
-			ErrUnsignedManifest, got, c.expectFingerprint)
+			ErrUnsignedManifest, c.key.fingerprint, c.expectFingerprint)
+	}
+	if err := c.key.verifyDetached(raw, sig, time.Now()); err != nil {
+		return Manifest{}, fmt.Errorf("%w: %w", ErrUnsignedManifest, err)
 	}
 
 	var manifest Manifest
