@@ -99,6 +99,8 @@ type sigSpec struct {
 	issuer       []byte
 	criticalType byte
 	packets      int
+	// oversizedValue makes the signature value one byte longer than the key.
+	oversizedValue bool
 }
 
 func subpacket(kind byte, data ...byte) []byte {
@@ -152,6 +154,10 @@ func (k testKey) sign(t testing.TB, data []byte, spec sigSpec) []byte {
 	value, err := rsa.SignPKCS1v15(rand.Reader, k.priv, hash, digest)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
+	}
+
+	if spec.oversizedValue {
+		value = append([]byte{0x01}, value...)
 	}
 
 	body := append(header, 0, 0) // no unhashed subpackets
@@ -276,6 +282,7 @@ func TestMalformedSignaturesAreRefused(t *testing.T) {
 		"made before the key existed":   {created: signer.created.Add(-time.Hour)},
 		"expired":                       {created: time.Now().Add(-2 * time.Hour), expiresAfter: 3600},
 		"an unknown critical subpacket": {criticalType: 99},
+		"a value longer than the key":   {oversizedValue: true},
 		"two signatures in one file":    {packets: 2},
 	}
 
