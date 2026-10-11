@@ -17,20 +17,18 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/ProtonMail/go-crypto/openpgp"
 )
 
 // The embedded key is the trust anchor, so it cannot be used to SIGN anything in
 // a test. These tests therefore stand up a bucket signed by a throwaway key and
-// swap the keyring — which also means every "bad signature" case below is a real
+// swap the key — which also means every "bad signature" case below is a real
 // cryptographic failure rather than a stubbed one.
 
 // bucket is a fake release bucket.
 type bucket struct {
 	version  string
 	binary   []byte
-	entity   *openpgp.Entity
+	key      testKey
 	platform string
 
 	// tamperManifest corrupts the manifest after signing.
@@ -52,11 +50,6 @@ type bucket struct {
 func newBucket(t *testing.T) *bucket {
 	t.Helper()
 
-	entity, err := openpgp.NewEntity("Test Signing", "", "test@example.com", nil)
-	if err != nil {
-		t.Fatalf("generate a signing key: %v", err)
-	}
-
 	platform, err := PlatformKey(runtimeGOOS(), runtimeGOARCH())
 	if err != nil {
 		t.Fatalf("PlatformKey: %v", err)
@@ -65,7 +58,7 @@ func newBucket(t *testing.T) *bucket {
 	return &bucket{
 		version:  "9.9.9",
 		binary:   bytes.Repeat([]byte("claude-code-binary"), 64),
-		entity:   entity,
+		key:      trustedTestKey(),
 		platform: platform,
 	}
 }
@@ -104,10 +97,7 @@ func (b *bucket) serve(t *testing.T) *httptest.Server {
 		t.Fatalf("marshal the manifest: %v", err)
 	}
 
-	var sig bytes.Buffer
-	if err := openpgp.ArmoredDetachSign(&sig, b.entity, bytes.NewReader(raw), nil); err != nil {
-		t.Fatalf("sign the manifest: %v", err)
-	}
+	sig := b.key.signManifest(t, raw)
 
 	served := raw
 	if b.tamperManifest {
@@ -128,7 +118,7 @@ func (b *bucket) serve(t *testing.T) *httptest.Server {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		_, _ = w.Write(sig.Bytes())
+		_, _ = w.Write(sig)
 	})
 	mux.HandleFunc("/"+b.version+"/"+b.platform+"/"+BinaryName, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(b.binary)
@@ -150,16 +140,17 @@ func installerFor(t *testing.T, b *bucket) (*Installer, string) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, b.entity)
+	trust(t, inst, b.key)
 	return inst, root
 }
 
-// trust substitutes a whole trust anchor: the keyring AND the fingerprint
-// Manifest will accept. Swapping only the keyring would leave the two disagreeing,
-// which is not a state production can reach.
-func trust(inst *Installer, entity *openpgp.Entity) {
-	inst.release.keyring = openpgp.EntityList{entity}
-	inst.release.expectFingerprint = strings.ToUpper(hex.EncodeToString(entity.PrimaryKey.Fingerprint))
+// trust substitutes a whole trust anchor: the key AND the fingerprint Manifest
+// will accept. Swapping only the key would leave the two disagreeing, which is
+// not a state production can reach.
+func trust(t *testing.T, inst *Installer, key testKey) {
+	t.Helper()
+	inst.release.key = key.public(t)
+	inst.release.expectFingerprint = inst.release.key.fingerprint
 }
 
 func runtimeGOOS() string   { return runtime.GOOS }
@@ -217,11 +208,7 @@ func TestInstallVerifiesAndPublishes(t *testing.T) {
 func TestInstallRefusesAnUntrustedManifest(t *testing.T) {
 	tests := map[string]func(*bucket){
 		"signed by a key we do not trust": func(b *bucket) {
-			other, err := openpgp.NewEntity("Impostor", "", "impostor@example.com", nil)
-			if err != nil {
-				t.Fatalf("generate: %v", err)
-			}
-			b.entity = other
+			b.key = impostorTestKey()
 		},
 		"altered after signing": func(b *bucket) { b.tamperManifest = true },
 		"no signature at all":   func(b *bucket) { b.omitSignature = true },
@@ -230,7 +217,7 @@ func TestInstallRefusesAnUntrustedManifest(t *testing.T) {
 	for name, corrupt := range tests {
 		t.Run(name, func(t *testing.T) {
 			b := newBucket(t)
-			trusted := b.entity
+			trusted := b.key
 			corrupt(b)
 
 			server := b.serve(t)
@@ -240,7 +227,7 @@ func TestInstallRefusesAnUntrustedManifest(t *testing.T) {
 				t.Fatalf("NewInstaller: %v", err)
 			}
 			// Trust the ORIGINAL key, whatever the bucket did.
-			trust(inst, trusted)
+			trust(t, inst, trusted)
 
 			if _, err := inst.Install(t.Context(), b.version); err == nil {
 				t.Fatal("an untrusted manifest was accepted")
@@ -408,24 +395,13 @@ func TestInstalledIsNewestFirst(t *testing.T) {
 // The embedded key must be the one the constant names, so swapping the file
 // alone cannot silently change who is trusted.
 func TestEmbeddedKeyMatchesTheDocumentedFingerprint(t *testing.T) {
-	keyring, err := openpgp.ReadArmoredKeyRing(strings.NewReader(string(signingKey)))
+	key, err := parsePublicKey(signingKey)
 	if err != nil {
 		t.Fatalf("read the embedded key: %v", err)
 	}
-	if err := assertFingerprint(keyring); err != nil {
+	if err := assertFingerprint(key); err != nil {
 		t.Fatalf("the embedded key does not match %s: %v", SigningKeyFingerprint, err)
 	}
-
-	var identities []string
-	for _, e := range keyring {
-		for name := range e.Identities {
-			identities = append(identities, name)
-		}
-	}
-	if len(identities) == 0 {
-		t.Fatal("the embedded key has no identity, so nobody can tell whose it is")
-	}
-	t.Logf("embedded signing key: %s", strings.Join(identities, ", "))
 }
 
 func TestPlatformKey(t *testing.T) {
@@ -532,7 +508,7 @@ func TestBinaryDownloadFailureLeavesNothingBehind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, b.entity)
+	trust(t, inst, b.key)
 
 	if _, err := inst.Install(t.Context(), b.version); err == nil {
 		t.Fatal("a missing binary produced no error")
@@ -607,12 +583,7 @@ func TestVersionSortingHandlesDebris(t *testing.T) {
 // The fingerprint assertion is what stops a swapped key file silently changing
 // who is trusted.
 func TestFingerprintAssertionRejectsAForeignKey(t *testing.T) {
-	other, err := openpgp.NewEntity("Impostor", "", "impostor@example.com", nil)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-
-	err = assertFingerprint(openpgp.EntityList{other})
+	err := assertFingerprint(impostorTestKey().public(t))
 	if !errors.Is(err, ErrUnsignedManifest) {
 		t.Fatalf("= %v, want ErrUnsignedManifest", err)
 	}
@@ -635,7 +606,7 @@ func TestARootThatIsNotADirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, b.entity)
+	trust(t, inst, b.key)
 
 	if _, err := inst.Installed(t.Context()); err == nil {
 		t.Error("Installed succeeded with a file where its root should be")
@@ -717,7 +688,7 @@ func TestATruncatedDownloadIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, b.entity)
+	trust(t, inst, b.key)
 
 	if _, err := inst.Install(t.Context(), b.version); !errors.Is(err, ErrChecksumMismatch) {
 		t.Fatalf("= %v, want ErrChecksumMismatch", err)
@@ -899,31 +870,31 @@ func TestPruneBudgetCountsOnlyInstalledProtectedVersions(t *testing.T) {
 	}
 }
 
-// A keyring holding the right key PLUS another would have satisfied a
+// A key file holding the right key PLUS another would have satisfied a
 // contains-check while making the other key a trusted manifest signer.
-func TestTheEmbeddedKeyringMustHoldExactlyOneKey(t *testing.T) {
-	real, err := openpgp.ReadArmoredKeyRing(strings.NewReader(string(signingKey)))
+func TestTheEmbeddedKeyFileMustHoldExactlyOneKey(t *testing.T) {
+	both := append(bytes.Clone(signingKey), impostorTestKey().armoredPublic()...)
+	// Two armor blocks: only the first is read, so the second cannot add a signer.
+	key, err := parsePublicKey(both)
 	if err != nil {
-		t.Fatalf("read the embedded key: %v", err)
+		t.Fatalf("parse: %v", err)
+	}
+	if err := assertFingerprint(key); err != nil {
+		t.Errorf("an appended block changed who is trusted: %v", err)
 	}
 
-	impostor, err := openpgp.NewEntity("Impostor", "", "impostor@example.com", nil)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-
-	if err := assertFingerprint(append(real, impostor)); !errors.Is(err, ErrUnsignedManifest) {
-		t.Errorf("a keyring with an extra key was accepted: %v", err)
-	}
-	if err := assertFingerprint(openpgp.EntityList{}); !errors.Is(err, ErrUnsignedManifest) {
-		t.Errorf("an empty keyring was accepted: %v", err)
+	// Two primary keys inside one block is refused outright.
+	inOne := armor("PUBLIC KEY BLOCK", append(
+		packetBytes(packetPublicKey, trustedTestKey().keyBody()),
+		packetBytes(packetPublicKey, impostorTestKey().keyBody())...))
+	if _, err := parsePublicKey(inOne); err == nil {
+		t.Error("a block with two primary keys was accepted")
 	}
 }
 
-// Verification must check WHO signed, not merely that the keyring contains the
-// pinned key: CheckArmoredDetachedSignature accepts a signature from any entity
-// in the ring.
-func TestASignatureFromAnExtraKeyInTheRingIsRefused(t *testing.T) {
+// Verification must check WHO signed, not merely that a key verifies:
+// the verification key must be the pinned one.
+func TestAVerificationKeyThatIsNotThePinnedOneIsRefused(t *testing.T) {
 	b := newBucket(t)
 	inst, _ := installerFor(t, b)
 
@@ -953,7 +924,7 @@ func TestACollisionThatAppearsMidInstallIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, b.entity)
+	trust(t, inst, b.key)
 
 	// Stand in for the other daemon: it finishes while our download is in
 	// flight, so the destination is empty at the fast path and complete by the
@@ -1038,20 +1009,17 @@ func TestInstalledIgnoresWhatIsNotAVersion(t *testing.T) {
 // only up to whatever the signer signed.
 func TestAValidlySignedManifestThatIsNotJSON(t *testing.T) {
 	b := newBucket(t)
-	entity := b.entity
+	key := b.key
 
 	raw := []byte("this is signed, and it is not a manifest")
-	var sig bytes.Buffer
-	if err := openpgp.ArmoredDetachSign(&sig, entity, bytes.NewReader(raw), nil); err != nil {
-		t.Fatalf("sign: %v", err)
-	}
+	sig := key.signManifest(t, raw)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/9.9.9/manifest.json", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(raw)
 	})
 	mux.HandleFunc("/9.9.9/manifest.json.sig", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(sig.Bytes())
+		_, _ = w.Write(sig)
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -1060,7 +1028,7 @@ func TestAValidlySignedManifestThatIsNotJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, entity)
+	trust(t, inst, key)
 
 	_, err = inst.Install(t.Context(), "9.9.9")
 	if err == nil {
@@ -1092,7 +1060,7 @@ func TestABinaryTheBucketDoesNotServe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, b.entity)
+	trust(t, inst, b.key)
 
 	if _, err := inst.Install(t.Context(), b.version); err == nil {
 		t.Fatal("a missing binary was not reported")
@@ -1193,7 +1161,7 @@ func TestConcurrentInstallsOfOneVersionDownloadItOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInstaller: %v", err)
 	}
-	trust(inst, b.entity)
+	trust(t, inst, b.key)
 
 	const callers = 5
 	results := make(chan error, callers)
