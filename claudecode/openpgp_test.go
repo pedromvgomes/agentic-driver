@@ -330,3 +330,43 @@ func TestParsePublicKeyRequiresExactlyOnePrimaryKey(t *testing.T) {
 		t.Error("garbage was accepted")
 	}
 }
+
+func TestParsePublicKeyRefusesADefectiveKeyBody(t *testing.T) {
+	k := trustedTestKey()
+	n := mpi(k.priv.N.Bytes())
+	header := func(version, algo byte) []byte {
+		return append(binary.BigEndian.AppendUint32([]byte{version}, uint32(k.created.Unix())), algo)
+	}
+	body := func(version, algo byte, e int64, trailer ...byte) []byte {
+		out := append(header(version, algo), n...)
+		out = append(out, mpi(big.NewInt(e).Bytes())...)
+		return append(out, trailer...)
+	}
+
+	tests := map[string][]byte{
+		"a v3 key":                    body(3, algoRSA, 65537),
+		"a non-RSA algorithm":         body(4, 22, 65537),
+		"an even exponent":            body(4, algoRSA, 65536),
+		"an exponent below 3":         body(4, algoRSA, 1),
+		"an exponent that is too big": body(4, algoRSA, 1<<32+1),
+		"trailing bytes":              body(4, algoRSA, 65537, 0x00),
+		"a body too short to read":    header(4, algoRSA)[:4],
+		"a truncated modulus":         append(header(4, algoRSA), n[:10]...),
+	}
+
+	for name, keyBody := range tests {
+		t.Run(name, func(t *testing.T) {
+			block := armor("PUBLIC KEY BLOCK", packetBytes(packetPublicKey, keyBody))
+			if _, err := parsePublicKey(block); err == nil {
+				t.Fatal("a defective key was accepted")
+			}
+		})
+	}
+
+	t.Run("the well-formed body is accepted", func(t *testing.T) {
+		block := armor("PUBLIC KEY BLOCK", packetBytes(packetPublicKey, body(4, algoRSA, 65537)))
+		if _, err := parsePublicKey(block); err != nil {
+			t.Fatalf("a well-formed key was refused: %v", err)
+		}
+	})
+}
