@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -110,8 +111,14 @@ func parsePublicKey(armored []byte) (publicKey, error) {
 	}
 
 	// The v4 fingerprint is the SHA-1 of 0x99, the 2-byte body length, and the body.
+	// Two MPIs of at most 8 KiB each cannot reach this; the bound keeps the
+	// 16-bit length in the fingerprint input from truncating.
+	if len(body) > math.MaxUint16 {
+		return publicKey{}, errors.New("the primary key is too long to fingerprint")
+	}
+	length := uint16(len(body))
 	h := sha1.New() //nolint:gosec // see the import.
-	h.Write([]byte{0x99, byte(len(body) >> 8), byte(len(body))})
+	h.Write([]byte{0x99, byte(length >> 8), byte(length)})
 	h.Write(body)
 
 	key := publicKey{
@@ -159,7 +166,8 @@ func (k publicKey) verifyDetached(data, armoredSig []byte, now time.Time) error 
 		return fmt.Errorf("the signature hash algorithm %d is not SHA-256 or stronger", sig[3])
 	}
 
-	hashedLen := int(binary.BigEndian.Uint16(sig[4:6]))
+	hashedLen16 := binary.BigEndian.Uint16(sig[4:6])
+	hashedLen := int(hashedLen16)
 	if len(sig) < 6+hashedLen+2 {
 		return errors.New("the signature is truncated")
 	}
@@ -202,7 +210,7 @@ func (k publicKey) verifyDetached(data, armoredSig []byte, now time.Time) error 
 	h := hash.New()
 	h.Write(data)
 	h.Write(sig[:6+hashedLen])
-	trailer := binary.BigEndian.AppendUint32([]byte{4, 0xff}, uint32(6+hashedLen))
+	trailer := binary.BigEndian.AppendUint32([]byte{4, 0xff}, 6+uint32(hashedLen16))
 	h.Write(trailer)
 	digest := h.Sum(nil)
 
