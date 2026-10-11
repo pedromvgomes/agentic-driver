@@ -21,7 +21,7 @@ import (
 
 // The embedded key is the trust anchor, so it cannot be used to SIGN anything in
 // a test. These tests therefore stand up a bucket signed by a throwaway key and
-// swap the keyring — which also means every "bad signature" case below is a real
+// swap the key — which also means every "bad signature" case below is a real
 // cryptographic failure rather than a stubbed one.
 
 // bucket is a fake release bucket.
@@ -892,9 +892,9 @@ func TestTheEmbeddedKeyFileMustHoldExactlyOneKey(t *testing.T) {
 	}
 }
 
-// Verification must check WHO signed, not merely that the keyring contains the
-// pinned key.
-func TestASignatureFromAnExtraKeyInTheRingIsRefused(t *testing.T) {
+// Verification must check WHO signed, not merely that a key verifies:
+// the verification key must be the pinned one.
+func TestAVerificationKeyThatIsNotThePinnedOneIsRefused(t *testing.T) {
 	b := newBucket(t)
 	inst, _ := installerFor(t, b)
 

@@ -87,7 +87,7 @@ func parsePublicKey(armored []byte) (publicKey, error) {
 	body = primaries[0]
 
 	// version | created (4) | algorithm | n | e
-	if len(body) < 6 || body[0] != 4 {
+	if len(body) < 6 || body[0] != 4 { // [lydite:exclude_from_mutation][a 6-byte body fails reading the modulus instead]
 		return publicKey{}, errors.New("the primary key is not an OpenPGP v4 key")
 	}
 	if body[5] != algoRSA {
@@ -113,12 +113,11 @@ func parsePublicKey(armored []byte) (publicKey, error) {
 	// The v4 fingerprint is the SHA-1 of 0x99, the 2-byte body length, and the body.
 	// Two MPIs of at most 8 KiB each cannot reach this; the bound keeps the
 	// 16-bit length in the fingerprint input from truncating.
-	if len(body) > math.MaxUint16 {
+	if len(body) > math.MaxUint16 { // [lydite:exclude_from_mutation][unreachable: MPIs cap the body below 17 KiB]
 		return publicKey{}, errors.New("the primary key is too long to fingerprint")
 	}
-	length := uint16(len(body))
-	h := sha1.New() //nolint:gosec // see the import.
-	h.Write([]byte{0x99, byte(length >> 8), byte(length)})
+	h := sha1.New()                                              //nolint:gosec // see the import.
+	h.Write([]byte{0x99, byte(len(body) >> 8), byte(len(body))}) // #nosec G115 -- len(body) is at most MaxUint16, checked above.
 	h.Write(body)
 
 	key := publicKey{
@@ -152,36 +151,39 @@ func (k publicKey) verifyDetached(data, armoredSig []byte, now time.Time) error 
 	sig := packets[0].body
 
 	// version | type | public-key algorithm | hash algorithm | hashed length (2)
-	if len(sig) < 6 || sig[0] != 4 {
+	fixed, rest, ok := take(sig, 6)
+	if !ok || fixed[0] != 4 {
 		return errors.New("the signature is not an OpenPGP v4 signature")
 	}
-	if sig[1] != sigTypeBinary {
-		return fmt.Errorf("the signature type is %#x, expected a binary-document signature", sig[1])
+	if fixed[1] != sigTypeBinary {
+		return fmt.Errorf("the signature type is %#x, expected a binary-document signature", fixed[1])
 	}
-	if sig[2] != algoRSA {
-		return fmt.Errorf("the signature uses algorithm %d, only RSA (%d) is supported", sig[2], algoRSA)
+	if fixed[2] != algoRSA {
+		return fmt.Errorf("the signature uses algorithm %d, only RSA (%d) is supported", fixed[2], algoRSA)
 	}
-	hash, ok := hashes[sig[3]]
+	hash, known := hashes[fixed[3]]
+	if !known {
+		return fmt.Errorf("the signature hash algorithm %d is not SHA-256 or stronger", fixed[3])
+	}
+
+	hashed, rest, ok := take(rest, int(binary.BigEndian.Uint16(fixed[4:6])))
 	if !ok {
-		return fmt.Errorf("the signature hash algorithm %d is not SHA-256 or stronger", sig[3])
-	}
-
-	hashedLen16 := binary.BigEndian.Uint16(sig[4:6])
-	hashedLen := int(hashedLen16)
-	if len(sig) < 6+hashedLen+2 {
 		return errors.New("the signature is truncated")
 	}
-	hashed := sig[6 : 6+hashedLen]
-	rest := sig[6+hashedLen:]
-
-	unhashedLen := int(binary.BigEndian.Uint16(rest[:2]))
-	if len(rest) < 2+unhashedLen+2 {
+	unhashedLen, rest, ok := take(rest, 2)
+	if !ok {
 		return errors.New("the signature is truncated")
 	}
-	rest = rest[2+unhashedLen:]
-	leftTwo := rest[:2]
+	_, rest, ok = take(rest, int(binary.BigEndian.Uint16(unhashedLen)))
+	if !ok {
+		return errors.New("the signature is truncated")
+	}
+	leftTwo, rest, ok := take(rest, 2)
+	if !ok {
+		return errors.New("the signature is truncated")
+	}
 
-	sigMPI, tail, err := readMPI(rest[2:])
+	sigMPI, tail, err := readMPI(rest)
 	if err != nil {
 		return fmt.Errorf("read the signature value: %w", err)
 	}
@@ -209,8 +211,9 @@ func (k publicKey) verifyDetached(data, armoredSig []byte, now time.Time) error 
 
 	h := hash.New()
 	h.Write(data)
-	h.Write(sig[:6+hashedLen])
-	trailer := binary.BigEndian.AppendUint32([]byte{4, 0xff}, 6+uint32(hashedLen16))
+	h.Write(fixed)
+	h.Write(hashed)
+	trailer := binary.BigEndian.AppendUint32([]byte{4, 0xff}, 6+uint32(len(hashed)))
 	h.Write(trailer)
 	digest := h.Sum(nil)
 
@@ -262,7 +265,7 @@ func readPackets(data []byte) ([]packet, error) {
 			case first < 192:
 				length, data = first, data[1:]
 			case first < 224:
-				if len(data) < 2 {
+				if len(data) < 2 { // [lydite:exclude_from_mutation][a 2-byte input declares at least 192 body bytes and fails below]
 					return nil, errors.New("truncated OpenPGP packet length")
 				}
 				length, data = (first-192)<<8+int(data[1])+192, data[2:]
@@ -296,8 +299,16 @@ func readPackets(data []byte) ([]packet, error) {
 }
 
 // readMPI reads one multiprecision integer: a 2-byte bit count, then the value.
+// take splits n bytes off the front of b.
+func take(b []byte, n int) (head, rest []byte, ok bool) {
+	if n < 0 || n > len(b) {
+		return nil, nil, false
+	}
+	return b[:n], b[n:], true
+}
+
 func readMPI(data []byte) (*big.Int, []byte, error) {
-	if len(data) < 2 {
+	if len(data) < 2 { // [lydite:exclude_from_mutation][a 2-byte input has a zero bit count and fails below]
 		return nil, nil, errors.New("truncated integer")
 	}
 	bits := int(binary.BigEndian.Uint16(data[:2]))
@@ -394,7 +405,7 @@ func dearmor(data []byte, blockType string) ([]byte, error) {
 	if i == len(lines) {
 		return nil, fmt.Errorf("no %q armor block", blockType)
 	}
-	i++
+	i++ // [lydite:exclude_from_mutation][the header scan below also skips the BEGIN line]
 
 	// Armor headers end at the first blank line.
 	for ; i < len(lines) && strings.TrimSpace(lines[i]) != ""; i++ {
@@ -402,7 +413,7 @@ func dearmor(data []byte, blockType string) ([]byte, error) {
 
 	var b64 strings.Builder
 	terminated := false
-	for i++; i < len(lines); i++ {
+	for i++; i < len(lines); i++ { // [lydite:exclude_from_mutation][starting on the blank line adds an empty string to the base64 text]
 		line := strings.TrimSpace(lines[i])
 		if line == end {
 			terminated = true

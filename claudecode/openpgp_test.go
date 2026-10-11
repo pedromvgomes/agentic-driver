@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"math/big"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -376,4 +377,221 @@ func TestParsePublicKeyRefusesADefectiveKeyBody(t *testing.T) {
 			t.Fatalf("a well-formed key was refused: %v", err)
 		}
 	})
+}
+
+func TestTake(t *testing.T) {
+	b := []byte{1, 2, 3}
+	if head, rest, ok := take(b, 3); !ok || len(head) != 3 || len(rest) != 0 {
+		t.Errorf("take(all) = %v, %v, %v", head, rest, ok)
+	}
+	if head, rest, ok := take(b, 0); !ok || len(head) != 0 || len(rest) != 3 {
+		t.Errorf("take(0) = %v, %v, %v", head, rest, ok)
+	}
+	if _, _, ok := take(b, 4); ok {
+		t.Error("take past the end succeeded")
+	}
+	if _, _, ok := take(b, -1); ok {
+		t.Error("take of a negative count succeeded")
+	}
+}
+
+func TestReadPackets(t *testing.T) {
+	long := bytes.Repeat([]byte{7}, 300)
+	five := bytes.Repeat([]byte{8}, 9000)
+
+	accepted := map[string]struct {
+		in   []byte
+		want []packet
+	}{
+		"a new-format packet with no body":  {[]byte{0xc2, 0x00}, []packet{{tag: 2, body: []byte{}}}},
+		"a new-format one-byte length":      {[]byte{0xc6, 0x02, 9, 9}, []packet{{tag: 6, body: []byte{9, 9}}}},
+		"the longest one-byte length":       {append([]byte{0xc2, 191}, bytes.Repeat([]byte{1}, 191)...), nil},
+		"the shortest two-byte length":      {append([]byte{0xc2, 192, 0}, bytes.Repeat([]byte{1}, 192)...), nil},
+		"a two-byte length":                 {append([]byte{0xc2, 192, 108}, long...), nil},
+		"a five-byte length":                {append([]byte{0xc2, 255, 0, 0, 0x23, 0x28}, five...), nil},
+		"an old-format packet with no body": {[]byte{0x88, 0x00}, []packet{{tag: 2, body: []byte{}}}},
+		"an old-format two-byte length":     {[]byte{0x89, 0x00, 0x01, 5}, []packet{{tag: 2, body: []byte{5}}}},
+		"an old-format four-byte length":    {[]byte{0x8a, 0x00, 0x00, 0x00, 0x01, 5}, []packet{{tag: 2, body: []byte{5}}}},
+		"two packets back to back":          {[]byte{0xc2, 0x01, 1, 0xc6, 0x01, 2}, []packet{{tag: 2, body: []byte{1}}, {tag: 6, body: []byte{2}}}},
+		"no packets":                        {nil, nil},
+	}
+	for name, tc := range accepted {
+		t.Run(name, func(t *testing.T) {
+			got, err := readPackets(tc.in)
+			if err != nil {
+				t.Fatalf("readPackets: %v", err)
+			}
+			if tc.want != nil && !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("= %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	refused := map[string][]byte{
+		"a header without the high bit":              {0x42, 0x00},
+		"a new-format header with no length":         {0xc2},
+		"a partial length":                           {0xc2, 224, 1},
+		"a two-byte length cut short":                {0xc2, 192},
+		"a five-byte length cut short":               {0xc2, 255, 0, 0, 0},
+		"a body shorter than its length":             {0xc2, 0x05, 1, 2},
+		"an old-format indeterminate length":         {0x8b, 1},
+		"an old-format length cut short":             {0x89, 0x00},
+		"an old-format four-byte length cut":         {0x8a, 0, 0, 0},
+		"a length byte reserved for partial lengths": append([]byte{0xc2, 224, 0}, make([]byte, 8384)...),
+	}
+	for name, in := range refused {
+		t.Run(name, func(t *testing.T) {
+			if _, err := readPackets(in); err == nil {
+				t.Fatal("malformed packets were accepted")
+			}
+		})
+	}
+}
+
+func TestReadMPI(t *testing.T) {
+	if v, rest, err := readMPI([]byte{0x00, 0x09, 0x01, 0xff, 0xaa}); err != nil || v.Int64() != 0x1ff || len(rest) != 1 {
+		t.Errorf("= %v, %v, %v", v, rest, err)
+	}
+	for name, in := range map[string][]byte{
+		"empty":                 nil,
+		"one byte":              {0x00},
+		"a zero bit count":      {0x00, 0x00},
+		"a value cut short":     {0x00, 0x10, 0x01},
+		"a bit count that lies": {0x00, 0x10, 0x01, 0xff},
+	} {
+		if _, _, err := readMPI(in); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestReadSubpackets(t *testing.T) {
+	filler := func(kind byte, n int) []byte {
+		return append([]byte{kind}, bytes.Repeat([]byte{0}, n-1)...)
+	}
+	twoByte := append([]byte{192, 0}, filler(100, 192)...)
+	fiveByte := append([]byte{255, 0, 0, 0x23, 0x28}, filler(100, 9000)...)
+	empty := []byte{1, 100}
+	created := subpacket(subpacketCreated, 0, 0, 0, 9)
+
+	for name, area := range map[string][]byte{
+		"an unknown subpacket with two-byte length":  append(bytes.Clone(twoByte), created...),
+		"an unknown subpacket with five-byte length": append(bytes.Clone(fiveByte), created...),
+		"an unknown subpacket with no data":          append(bytes.Clone(empty), created...),
+		"the longest one-byte length":                append(append([]byte{191}, filler(100, 191)...), created...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := readSubpackets(area)
+			if err != nil {
+				t.Fatalf("readSubpackets: %v", err)
+			}
+			if !got.hasCreated || got.created.Unix() != 9 {
+				t.Errorf("the creation time after the unknown subpacket was lost: %+v", got)
+			}
+		})
+	}
+
+	for name, area := range map[string][]byte{
+		"a zero length":                {0},
+		"a length past the area":       {5, 100, 1},
+		"a two-byte length cut short":  {192},
+		"a five-byte length cut short": {255, 0, 0, 0},
+		"a short creation time":        subpacket(subpacketCreated, 1, 2),
+		"a short expiry":               subpacket(subpacketExpires, 1, 2),
+		"a malformed issuer":           subpacket(subpacketIssuerFpr, 4, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := readSubpackets(area); err == nil {
+				t.Fatal("a malformed subpacket area was accepted")
+			}
+		})
+	}
+}
+
+func TestDearmor(t *testing.T) {
+	body := armor("SIGNATURE", []byte("hello"))
+
+	if got, err := dearmor(append([]byte("noise before\n"), body...), "SIGNATURE"); err != nil || string(got) != "hello" {
+		t.Errorf("text before the block: %q, %v", got, err)
+	}
+	if got, err := dearmor(bytes.ReplaceAll(body, []byte("\n"), []byte("\r\n")), "SIGNATURE"); err != nil || string(got) != "hello" {
+		t.Errorf("CRLF line endings: %q, %v", got, err)
+	}
+	withHeaders := bytes.Replace(body, []byte("-----\n\n"), []byte("-----\nVersion: x\nComment: y\n\n"), 1)
+	if got, err := dearmor(withHeaders, "SIGNATURE"); err != nil || string(got) != "hello" {
+		t.Errorf("armor headers: %q, %v", got, err)
+	}
+	withCRC := bytes.Replace(body, []byte("\n-----END"), []byte("\n=AAAA\n-----END"), 1)
+	if got, err := dearmor(withCRC, "SIGNATURE"); err != nil || string(got) != "hello" {
+		t.Errorf("checksum line: %q, %v", got, err)
+	}
+
+	for name, in := range map[string][]byte{
+		"no blank line after the header": []byte("-----BEGIN PGP SIGNATURE-----\nVersion: x"),
+		"a different block type":         armor("PUBLIC KEY BLOCK", []byte("x")),
+		"BEGIN as the last line":         []byte("-----BEGIN PGP SIGNATURE-----"),
+		"an END marker with no BEGIN":    []byte("junk\n\naGVsbG8=\n-----END PGP SIGNATURE-----\n"),
+	} {
+		if _, err := dearmor(in, "SIGNATURE"); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestParsePublicKeyExponentBounds(t *testing.T) {
+	k := trustedTestKey()
+	n := mpi(k.priv.N.Bytes())
+	body := func(e int64) []byte {
+		out := append(binary.BigEndian.AppendUint32([]byte{4}, uint32(k.created.Unix())), algoRSA)
+		out = append(out, n...)
+		return append(out, mpi(big.NewInt(e).Bytes())...)
+	}
+	parse := func(e int64) error {
+		_, err := parsePublicKey(armor("PUBLIC KEY BLOCK", packetBytes(packetPublicKey, body(e))))
+		return err
+	}
+
+	for _, e := range []int64{3, 65537, 1<<31 - 1} {
+		if err := parse(e); err != nil {
+			t.Errorf("exponent %d refused: %v", e, err)
+		}
+	}
+	for _, e := range []int64{1, 2, 4, 1<<31 + 1} {
+		if err := parse(e); err == nil {
+			t.Errorf("exponent %d accepted", e)
+		}
+	}
+}
+
+// Every proper prefix of a valid signature or key is refused, and none of them
+// panics.
+func TestTruncatedInputsAreRefused(t *testing.T) {
+	signer := trustedTestKey()
+	key := signer.public(t)
+	data := []byte("document")
+
+	sigPacket := signer.sign(t, data, sigSpec{expiresAfter: 3600})
+	raw, err := dearmor(sigPacket, "SIGNATURE")
+	if err != nil {
+		t.Fatalf("dearmor: %v", err)
+	}
+	packets, err := readPackets(raw)
+	if err != nil || len(packets) != 1 {
+		t.Fatalf("readPackets: %v", err)
+	}
+	body := packets[0].body
+	for n := range len(body) {
+		truncated := armor("SIGNATURE", packetBytes(packetSignature, body[:n]))
+		if err := key.verifyDetached(data, truncated, time.Now()); err == nil {
+			t.Fatalf("a signature cut to %d of %d bytes was accepted", n, len(body))
+		}
+	}
+
+	keyBody := signer.keyBody()
+	for n := range len(keyBody) {
+		block := armor("PUBLIC KEY BLOCK", packetBytes(packetPublicKey, keyBody[:n]))
+		if _, err := parsePublicKey(block); err == nil {
+			t.Fatalf("a key cut to %d of %d bytes was accepted", n, len(keyBody))
+		}
+	}
 }
