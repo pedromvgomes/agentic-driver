@@ -166,7 +166,8 @@ func (k publicKey) verifyDetached(data, armoredSig []byte, now time.Time) error 
 		return fmt.Errorf("the signature hash algorithm %d is not SHA-256 or stronger", fixed[3])
 	}
 
-	hashed, rest, ok := take(rest, int(binary.BigEndian.Uint16(fixed[4:6])))
+	hashedLen := binary.BigEndian.Uint16(fixed[4:6])
+	hashed, rest, ok := take(rest, int(hashedLen))
 	if !ok {
 		return errors.New("the signature is truncated")
 	}
@@ -213,7 +214,7 @@ func (k publicKey) verifyDetached(data, armoredSig []byte, now time.Time) error 
 	h.Write(data)
 	h.Write(fixed)
 	h.Write(hashed)
-	trailer := binary.BigEndian.AppendUint32([]byte{4, 0xff}, 6+uint32(len(hashed)))
+	trailer := binary.BigEndian.AppendUint32([]byte{4, 0xff}, 6+uint32(hashedLen))
 	h.Write(trailer)
 	digest := h.Sum(nil)
 
