@@ -47,3 +47,4 @@ go.work.sum
 # coverage report, and the document the pull-request comment is rendered from.
 # Committed, they would become part of what lydite measures.
 /.lydite-reports/
+/.agentic-toolkit.lock.yaml
